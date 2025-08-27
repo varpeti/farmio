@@ -102,7 +102,8 @@ type PlayerId = usize;
 
 #[derive(Debug)]
 pub struct PlayerAction {
-    pub player_id: PlayerId,
+    pub player_name: String,
+    pub secret_name: String,
     pub action: Action,
     pub response_tx: oneshot::Sender<Response>,
 }
@@ -133,13 +134,12 @@ pub enum ActionResult {
     SuccessIdle,
     InvalidAction,
     Connected {
-        time_left_until_start: usize,
-        players_left_to_join: usize,
+        players_connected: usize,
+        player_count: usize,
+        map_size: usize,
+        turn_duration_ms: u64,
     },
-    Waiting {
-        time_left_until_start: usize,
-        players_left_to_join: usize,
-    },
+    GameStarting,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,18 +152,22 @@ pub enum BlockedBy {
 
 type Inventory = HashMap<Resource, usize>;
 
+type SecretName = String;
+
 #[derive(Debug)]
 pub struct Player {
+    pub player_name: String,
     pub position: Position,
     pub inventory: Inventory,
 }
 
 impl Player {
-    fn new_with_random_position(map_size: usize) -> Player {
+    fn new_with_random_position(player_name: String, map_size: usize) -> Player {
         let mut rng = rand::rng();
         let x = rng.random_range(0..map_size) as isize;
         let y = rng.random_range(0..map_size) as isize;
         Player {
+            player_name,
             position: Position { x, y },
             inventory: HashMap::new(),
         }
@@ -171,24 +175,22 @@ impl Player {
 }
 
 #[derive(Debug)]
-pub struct GameServer {
+pub struct Game {
     map_size: usize,
     map: Vec<Vec<Cell>>,
-    number_of_players: usize,
-    players: HashMap<PlayerId, Player>,
+    player_count: usize,
+    players: HashMap<SecretName, Player>,
     action_rx: mpsc::Receiver<PlayerAction>,
     turn_duration: Duration,
-    connection_duration: Duration,
 }
 
-impl GameServer {
+impl Game {
     pub fn new(
         action_rx: mpsc::Receiver<PlayerAction>,
         map_size: usize,
         number_of_players: usize,
         turn_duration: Duration,
-        connection_duration: Duration,
-    ) -> GameServer {
+    ) -> Game {
         let mut map = Vec::with_capacity(map_size);
         for _y in 0..map_size {
             let mut line = Vec::with_capacity(map_size);
@@ -204,11 +206,10 @@ impl GameServer {
         Self {
             map_size,
             map,
-            number_of_players,
+            player_count: number_of_players,
             players: HashMap::new(),
             action_rx,
             turn_duration,
-            connection_duration,
         }
     }
 
@@ -222,40 +223,27 @@ impl GameServer {
 
     async fn wait_for_connections(&mut self) {
         let mut players_connected = 0;
-        let deadline = tokio::time::Instant::now() + self.connection_duration;
-        while tokio::time::Instant::now() < deadline && players_connected < self.number_of_players {
-            println!(
-                "Game starting in {} sec",
-                (deadline - tokio::time::Instant::now()).as_secs()
-            );
-            match tokio::time::timeout(
-                deadline - tokio::time::Instant::now(),
-                self.action_rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(player_action)) => {
-                    let action_result = match self.players.contains_key(&player_action.player_id) {
-                        false => {
-                            self.players.insert(
-                                player_action.player_id,
-                                Player::new_with_random_position(self.map_size),
+        while players_connected < self.player_count {
+            match self.action_rx.recv().await {
+                Some(player_action) => {
+                    let player = self
+                        .players
+                        .entry(player_action.secret_name)
+                        .or_insert_with(|| {
+                            let player = Player::new_with_random_position(
+                                player_action.secret_name,
+                                self.map_size,
                             );
-                            println!("Player {} connected!", player_action.player_id);
+                            println!("Player {} connected!", player_action.player_name);
                             players_connected += 1;
-                            ActionResult::Connected {
-                                time_left_until_start: (deadline - tokio::time::Instant::now())
-                                    .as_secs()
-                                    as usize,
-                                players_left_to_join: self.number_of_players - players_connected,
-                            }
-                        }
-                        true => ActionResult::Waiting {
-                            time_left_until_start: (deadline - tokio::time::Instant::now())
-                                .as_secs()
-                                as usize,
-                            players_left_to_join: self.number_of_players - players_connected,
-                        },
+                            player
+                        });
+
+                    ActionResult::Connected {
+                        players_connected,
+                        player_count: self.player_count,
+                        map_size: self.map_size,
+                        turn_duration_ms: self.turn_duration.as_millis() as u64,
                     };
 
                     if player_action
@@ -273,11 +261,10 @@ impl GameServer {
                         eprintln!("Unable to send back the result to the client handler (wait_for_connections). (Player: {})", player_action.player_id);
                     };
                 }
-                Ok(None) => {
+                None => {
                     eprintln!("The action_rx channel closed (Durring connection) ?");
                     break;
                 }
-                Err(_) => break, // Timeout
             }
         }
     }
@@ -287,7 +274,7 @@ impl GameServer {
 
         let deadline = tokio::time::Instant::now() + self.turn_duration;
 
-        let mut players_left_to_take_action = self.number_of_players;
+        let mut players_left_to_take_action = self.player_count;
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(
                 deadline - tokio::time::Instant::now(),
