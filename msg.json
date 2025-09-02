@@ -1,0 +1,3 @@
+{ "NewGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "player_count" : 2, "map_size" : 8, "turn_duration_ms" : 5000 } }
+
+{ "JoinGame" : { "player_name" : "Player2", "player_uuid" : "ca91129c-09ca-40fd-8c8c-7f9a78ab2f8e", "game_name": "Game1" } }
