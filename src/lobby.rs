@@ -237,7 +237,8 @@ async fn player_game_loop(
                         let _ = send_msg_to_player(
                             framed,
                             player_name,
-                            &"Error: Response RX is closed for the Game".to_string(),
+                            &"Error: Response RX is closed for the Game (@player_game_loop)"
+                                .to_string(),
                         )
                         .await;
                     }
