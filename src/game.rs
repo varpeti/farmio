@@ -1,11 +1,8 @@
 use std::{collections::HashMap, time::Duration};
 
-use futures::SinkExt;
 use rand::{rngs::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Receiver;
-
-use crate::lobby::TcpSender;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug, Deserialize)]
 pub enum Action {
@@ -13,7 +10,7 @@ pub enum Action {
     #[serde(skip_deserializing)]
     __Connect__ {
         player_name: String,
-        tcp_sender: TcpSender,
+        response_tx: Sender<Response>,
     },
 }
 
@@ -35,7 +32,6 @@ pub enum Response {
 pub enum Error {
     ServerIsFull,
     WaitForOtherPlayers,
-    InternalError(String),
 }
 
 #[derive(Debug)]
@@ -70,10 +66,10 @@ impl Game {
         while let Some(player_action) = self.action_rx.recv().await {
             self.wait_for_join(player_action).await;
             if self.player_count as usize <= self.players.len() {
-                for (_, player) in self.players.iter_mut() {
+                for (_, player) in self.players.iter() {
                     send_response(
                         Response::GameStarted,
-                        &mut player.tcp_sender,
+                        player.response_tx.clone(),
                         player.player_name.clone(),
                     )
                     .await;
@@ -92,19 +88,19 @@ impl Game {
     async fn wait_for_join(&mut self, player_action: PlayerAction) {
         if let Action::__Connect__ {
             player_name,
-            tcp_sender,
+            response_tx,
         } = player_action.action
         {
-            self.connect_player(player_action.player_uuid, player_name, tcp_sender)
+            self.connect_player(player_action.player_uuid, player_name, response_tx)
                 .await;
-        } else if let Some(player) = self.players.get_mut(&player_action.player_uuid) {
+        } else if let Some(player) = self.players.get(&player_action.player_uuid) {
             eprintln!(
                 "Player `{:?}` tried to `{:?}` in wait_for_join phase",
                 player.player_name, player_action.action
             );
             send_response(
                 Response::Error(Error::WaitForOtherPlayers),
-                &mut player.tcp_sender,
+                player.response_tx.clone(),
                 player.player_name.clone(),
             )
             .await;
@@ -122,11 +118,11 @@ impl Game {
             (
                 Action::__Connect__ {
                     player_name,
-                    tcp_sender,
+                    response_tx,
                 },
                 _,
             ) => {
-                self.connect_player(player_action.player_uuid.clone(), player_name, tcp_sender)
+                self.connect_player(player_action.player_uuid.clone(), player_name, response_tx)
                     .await;
                 return; // connect_player sends a response, we maybe don't have a new player
             }
@@ -134,7 +130,12 @@ impl Game {
         };
 
         if let Some(player) = player {
-            send_response(response, &mut player.tcp_sender, player.player_name.clone()).await;
+            send_response(
+                response,
+                player.response_tx.clone(),
+                player.player_name.clone(),
+            )
+            .await;
         }
     }
 
@@ -142,50 +143,39 @@ impl Game {
         &mut self,
         player_uuid: String,
         player_name: String,
-        mut tcp_sender: TcpSender,
+        response_tx: Sender<Response>,
     ) {
-        match (
+        let response = match (
             self.players.len() >= self.player_count as usize,
             self.players.contains_key(&player_uuid),
         ) {
             (_, true) => {
                 eprintln!("Player `{}` reconnected!", player_name);
-                send_response(Response::Connected, &mut tcp_sender, player_name).await;
+                Response::Connected
             }
             (true, false) => {
                 eprintln!("Player `{}` tried to connect but it is full!", player_name);
-                send_response(
-                    Response::Error(Error::ServerIsFull),
-                    &mut tcp_sender,
-                    player_name,
-                )
-                .await;
+                Response::Error(Error::ServerIsFull)
             }
             (false, false) => {
-                eprintln!("Player `{}` connected!", player_name);
-                send_response(Response::Connected, &mut tcp_sender, player_name.clone()).await;
                 self.players.insert(
                     player_uuid,
-                    Player::new_with_random_position(tcp_sender, self.map_size as i32, player_name),
+                    Player::new_with_random_position(
+                        response_tx.clone(),
+                        self.map_size as i32,
+                        player_name.clone(),
+                    ),
                 );
+                eprintln!("Player `{}` connected!", player_name);
+                Response::Connected
             }
         };
+        send_response(response, response_tx, player_name).await;
     }
 }
 
-async fn send_response(response: Response, tcp_sender: &mut TcpSender, player_name: String) {
-    let response = match serde_json::to_string(&response) {
-        Ok(response) => response,
-        Err(err) => {
-            eprintln!(
-                "Failed to Serialize Player `{}` Response `{:?}`: `{}`",
-                player_name, response, err
-            );
-            "Error: Failed to Serialize Response".to_string()
-        }
-    };
-
-    if let Err(err) = tcp_sender.send(response).await {
+async fn send_response(response: Response, response_tx: Sender<Response>, player_name: String) {
+    if let Err(err) = response_tx.send(response).await {
         eprintln!(
             "Error when sending back Response to Player `{}`: `{}`",
             player_name, err
@@ -285,7 +275,7 @@ type Players = HashMap<String, Player>;
 
 #[derive(Debug)]
 struct Player {
-    tcp_sender: TcpSender,
+    response_tx: Sender<Response>,
     player_name: String,
     pos: Pos,
     resources: Vec<Resource>,
@@ -294,10 +284,14 @@ struct Player {
 }
 
 impl Player {
-    fn new_with_random_position(tcp_sender: TcpSender, map_size: i32, player_name: String) -> Self {
+    fn new_with_random_position(
+        response_tx: Sender<Response>,
+        map_size: i32,
+        player_name: String,
+    ) -> Self {
         let mut rng = rand::rng();
         Player {
-            tcp_sender,
+            response_tx,
             player_name,
             pos: Pos {
                 x: rng.random_range(0..map_size),
