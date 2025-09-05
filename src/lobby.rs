@@ -4,14 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Sender},
 };
 use tokio_util::codec::{Framed, LinesCodec};
 
-use crate::game::{Action, Game, PlayerAction, Response};
+use crate::game::{Action, Game, PlayerAction};
 
 pub type Games = Arc<DashMap<String, Sender<PlayerAction>>>;
-type Com = Framed<TcpStream, LinesCodec>;
+type FramedConnection = Framed<TcpStream, LinesCodec>;
+pub type TcpSender = futures::stream::SplitSink<FramedConnection, String>;
+type TcpReceiver = futures::stream::SplitStream<FramedConnection>;
 
 #[derive(Debug, Deserialize)]
 pub enum LobbyAction {
@@ -49,18 +51,19 @@ pub async fn new_lobby(ip_port: &str) {
 async fn handle_connection(socket: TcpStream, addr: SocketAddr, games: Games) {
     println!("Addr `{:?}` connecting...", addr);
 
-    let mut framed = Com::new(socket, LinesCodec::new());
+    let framed = FramedConnection::new(socket, LinesCodec::new());
+    let (tcp_sender, mut tcp_receiver) = framed.split();
 
-    match framed.next().await {
-        Some(Ok(msg)) => handle_message(&mut framed, addr, games, msg).await,
+    match tcp_receiver.next().await {
+        Some(Ok(msg)) => handle_message(tcp_sender, tcp_receiver, addr, games, msg).await,
         Some(Err(err)) => {
             eprintln!(
-                "Error with Addr `{}` in handle_connection/frmed.next() error: `{}`",
+                "Error with Addr `{}` in handle_connection/tcp_receiver.next() error: `{}`",
                 addr, err
             );
         }
         None => eprintln!(
-            "Error with Addr `{}` in handle_connection/framed.next() returned None",
+            "Error with Addr `{}` in handle_connection/tcp_receiver.next() returned None",
             addr
         ),
     }
@@ -68,17 +71,30 @@ async fn handle_connection(socket: TcpStream, addr: SocketAddr, games: Games) {
     println!("Addr `{:?}` disconnecting...", addr);
 }
 
-async fn handle_message(framed: &mut Com, addr: SocketAddr, games: Games, msg: String) {
+async fn handle_message(
+    mut tcp_sender: TcpSender,
+    tcp_receiver: TcpReceiver,
+    addr: SocketAddr,
+    games: Games,
+    msg: String,
+) {
     match serde_json::from_str::<LobbyAction>(&msg) {
-        Ok(lobby_action) => handle_lobby_action(framed, games, lobby_action).await,
+        Ok(lobby_action) => {
+            handle_lobby_action(tcp_sender, tcp_receiver, games, lobby_action).await
+        }
         Err(err) => {
             eprintln!("Invalid message from Addr `{}`; The Error: `{}`", addr, err);
-            // TODO: Send msg to Addr
+            send_msg_to_player(&mut tcp_sender, &addr.to_string(), &"InvalidAction").await;
         }
     }
 }
 
-async fn handle_lobby_action(framed: &mut Com, games: Games, lobby_action: LobbyAction) {
+async fn handle_lobby_action(
+    mut tcp_sender: TcpSender,
+    tcp_receiver: TcpReceiver,
+    games: Games,
+    lobby_action: LobbyAction,
+) {
     let (player_name, player_uuid, game_name) = match lobby_action {
         LobbyAction::NewGame {
             player_name,
@@ -113,7 +129,15 @@ async fn handle_lobby_action(framed: &mut Com, games: Games, lobby_action: Lobby
 
     match games.get(&game_name).map(|e| e.clone()) {
         Some(action_tx) => {
-            connect_player_to_the_game(framed, player_name, player_uuid, game_name, action_tx).await
+            connect_player_to_the_game_and_game_loop(
+                tcp_sender,
+                tcp_receiver,
+                player_name,
+                player_uuid,
+                game_name,
+                action_tx,
+            )
+            .await
         }
         None => {
             eprintln!(
@@ -121,7 +145,7 @@ async fn handle_lobby_action(framed: &mut Com, games: Games, lobby_action: Lobby
                 game_name, player_name,
             );
             let _ = send_msg_to_player(
-                framed,
+                &mut tcp_sender,
                 &player_name,
                 &format!("Error: The Game `{}` not found!", game_name),
             )
@@ -130,25 +154,27 @@ async fn handle_lobby_action(framed: &mut Com, games: Games, lobby_action: Lobby
     }
 }
 
-async fn connect_player_to_the_game(
-    framed: &mut Com,
+async fn connect_player_to_the_game_and_game_loop(
+    mut tcp_sender: TcpSender,
+    tcp_receiver: TcpReceiver,
     player_name: String,
     player_uuid: String,
     game_name: String,
     action_tx: Sender<PlayerAction>,
 ) {
-    let (response_tx, mut response_rx) = mpsc::channel::<Response>(1024);
-
+    // Connect
     let player_action = PlayerAction {
         player_uuid: player_uuid.clone(),
         action: Action::__Connect__ {
             player_name: player_name.clone(),
-            response_tx,
+            tcp_sender: tcp_sender.clone(),
+            // TODO: move back to mpsc from TCP
+            // but separate thread for mpsc -> TCP
         },
     };
 
     if send_player_msg_to_game(
-        framed,
+        &mut tcp_sender,
         &player_name,
         &game_name,
         action_tx.clone(),
@@ -157,55 +183,18 @@ async fn connect_player_to_the_game(
     .await
     .is_err()
     {
-        eprintln!("SHOULD NOT REACH THIS NOW");
         return;
     }
 
-    match response_rx.recv().await {
-        Some(response) => {
-            let _ = send_msg_to_player(framed, &player_name, &response).await;
-            if let Response::ConnectionSuccess = &response {
-                player_game_loop(
-                    framed,
-                    &player_name,
-                    player_uuid,
-                    &game_name,
-                    action_tx,
-                    response_rx,
-                )
-                .await;
-            }
-        }
-        None => {
-            eprintln!(
-                "response_rx is closed for Game: `{}`; Player: `{}`",
-                game_name, player_name
-            );
-            let _ = send_msg_to_player(
-                framed,
-                &player_name,
-                &"Error: Response RX is closed for the Game".to_string(),
-            )
-            .await;
-        }
-    }
-}
-
-async fn player_game_loop(
-    framed: &mut Com,
-    player_name: &str,
-    player_uuid: String,
-    game_name: &str,
-    action_tx: Sender<PlayerAction>,
-    mut response_rx: Receiver<Response>,
-) {
-    while let Some(frame_result) = framed.next().await {
+    // Player's game loop
+    while let Some(frame_result) = tcp_receiver.next().await {
         match frame_result {
             Ok(msg) => {
                 let action: Action = match serde_json::from_str(&msg) {
                     Ok(action) => action,
                     Err(_err) => {
-                        let _ = send_msg_to_player(framed, player_name, &"InvalidAction").await;
+                        let _ = send_msg_to_player(&mut tcp_sender, &player_name, &"InvalidAction")
+                            .await;
                         continue;
                     }
                 };
@@ -217,32 +206,13 @@ async fn player_game_loop(
                 };
 
                 let _ = send_player_msg_to_game(
-                    framed,
-                    player_name,
-                    game_name,
+                    &mut tcp_sender,
+                    &player_name,
+                    &game_name,
                     action_tx.clone(),
                     player_action,
                 )
                 .await;
-
-                match response_rx.recv().await {
-                    Some(response) => {
-                        let _ = send_msg_to_player(framed, player_name, &response).await;
-                    }
-                    None => {
-                        eprintln!(
-                            "player_game_loop(): response_rx is closed for Game: `{}`; Player: `{}`",
-                            game_name, player_name
-                        );
-                        let _ = send_msg_to_player(
-                            framed,
-                            player_name,
-                            &"Error: Response RX is closed for the Game (@player_game_loop)"
-                                .to_string(),
-                        )
-                        .await;
-                    }
-                }
             }
             Err(err) => {
                 eprintln!(
@@ -256,7 +226,7 @@ async fn player_game_loop(
 }
 
 async fn send_player_msg_to_game(
-    framed: &mut Com,
+    tcp_sender: &mut TcpSender,
     player_name: &str,
     game_name: &str,
     action_tx: Sender<PlayerAction>,
@@ -268,7 +238,7 @@ async fn send_player_msg_to_game(
             player_name, game_name, err
         );
         let _ = send_msg_to_player(
-            framed,
+            tcp_sender,
             player_name,
             &format!(
                 "Error: Unable to send the Action to the Game `{}`",
@@ -282,13 +252,13 @@ async fn send_player_msg_to_game(
 }
 
 async fn send_msg_to_player<Msg: std::fmt::Debug + Serialize>(
-    framed: &mut Com,
+    tcp_sender: &mut TcpSender,
     player_name: &str,
     msg: &Msg,
 ) -> Result<(), ()> {
     match serde_json::to_string(msg) {
         Ok(msg_str) => {
-            if let Err(err) = framed.send(&msg_str).await {
+            if let Err(err) = tcp_sender.send(msg_str).await {
                 eprintln!(
                     "Unable to send msg `{:?}` to Player `{}`: `{}`",
                     &msg, player_name, err
