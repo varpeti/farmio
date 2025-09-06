@@ -1,19 +1,11 @@
-mod tcp_handler;
+use crate::com::com;
 
-use serde::{Deserialize, Serialize};
-
-use crate::tcp_handler::TcpHandler;
-
-// TODO: Remove these
-#[derive(Debug, Deserialize)]
-enum PlayerAction {}
-#[derive(Debug, Serialize)]
-enum Response {}
-#[derive(Debug, Deserialize)]
-enum GameSettings {}
+mod com;
+mod game;
+mod lobby;
 
 #[tokio::main]
 async fn main() {
     let ip_port = "127.0.0.1:5942";
-    TcpHandler::<PlayerAction, Response, GameSettings>::run(ip_port).await;
+    com(ip_port).await;
 }
