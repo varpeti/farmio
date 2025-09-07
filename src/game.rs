@@ -1,65 +1,102 @@
-use std::{collections::HashMap, time::Duration};
-
 use rand::{rngs::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
+use uuid::Uuid;
+
+use crate::handle_connection::PlayerAction;
 
 #[derive(Debug, Deserialize)]
 pub enum Action {
-    Idle,
+    //Idle,
     #[serde(skip_deserializing)]
     __Connect__ {
         player_name: String,
-        response_tx: Sender<Response>,
+        to_player_tx: Sender<String>,
     },
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PlayerAction {
-    pub player_uuid: String,
-    pub action: Action,
+pub struct GameSettings {}
+
+pub struct Game {
+    game_name: String,
+    to_game_rx: Receiver<PlayerAction>,
 }
 
-#[derive(Debug, Serialize)]
-pub enum Response {
-    Idle,
-    Connected,
-    GameStarted,
-    Error(Error),
-}
-
-#[derive(Debug, Serialize)]
-pub enum Error {
-    ServerIsFull,
-    WaitForOtherPlayers,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GameSettings {
-    map_size: u32,
-    player_count: u32,
-    turn_duration: Duration,
-}
-
-#[derive(Debug)]
-pub struct Game<'a> {
-    //map: Map,
-    //players: Players,
-    to_game_rx: &'a mut Receiver<String>,
-    game_settings: GameSettings,
-}
-
-impl<'a> Game<'a> {
-    pub fn new(to_game_rx: &'a mut Receiver<String>, game_settings: GameSettings) -> Game {
-        let mut rng = rand::rng();
+impl Game {
+    pub fn new(game_name: String, to_game_rx: Receiver<PlayerAction>) -> Self {
         Self {
-            //map: generate_map(map_size as usize, &mut rng),
-            //players: Players::new(),
+            game_name,
             to_game_rx,
-            game_settings,
+        }
+    }
+
+    pub async fn run(&mut self) {
+        while let Some(player_action) = self.to_game_rx.recv().await {
+            if let Action::__Connect__ {
+                player_name,
+                to_player_tx: response_tx,
+            } = player_action.action
+            {
+                if let Err(err) = response_tx.send("Connected".to_string()).await {
+                    eprintln!(
+                        "Unable to send message to Player `{}`: `{}`",
+                        player_name, err
+                    );
+                }
+            }
         }
     }
 }
+
+//
+// #[derive(Debug, Deserialize)]
+// pub struct PlayerAction {
+//     pub player_uuid: String,
+//     pub action: Action,
+// }
+//
+// #[derive(Debug, Serialize)]
+// pub enum Response {
+//     Idle,
+//     Connected,
+//     GameStarted,
+//     Error(Error),
+// }
+//
+// #[derive(Debug, Serialize)]
+// pub enum Error {
+//     ServerIsFull,
+//     WaitForOtherPlayers,
+// }
+//
+// #[derive(Debug, Deserialize)]
+// pub struct GameSettings {
+//     map_size: u32,
+//     player_count: u32,
+//     turn_duration: Duration,
+// }
+//
+// #[derive(Debug)]
+// pub struct Game<'a> {
+//     //map: Map,
+//     //players: Players,
+//     to_game_rx: &'a mut Receiver<String>,
+//     game_settings: GameSettings,
+// }
+//
+// impl<'a> Game<'a> {
+//     pub fn new(to_game_rx: &'a mut Receiver<String>, game_settings: GameSettings) -> Game {
+//         let mut rng = rand::rng();
+//         Self {
+//             //map: generate_map(map_size as usize, &mut rng),
+//             //players: Players::new(),
+//             to_game_rx,
+//             game_settings,
+//         }
+//     }
+// }
 
 //     pub async fn run(&mut self) {
 //         // Wait for everyone to join

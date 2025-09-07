@@ -1,11 +1,12 @@
-use crate::com::com;
+use crate::server::start_server;
 
-mod com;
 mod game;
-mod lobby;
+mod handle_connection;
+mod send_to_player;
+mod server;
 
 #[tokio::main]
 async fn main() {
     let ip_port = "127.0.0.1:5942";
-    com(ip_port).await;
+    start_server(ip_port).await;
 }
