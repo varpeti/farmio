@@ -4,7 +4,10 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     time::Duration,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    time::timeout,
+};
 use uuid::Uuid;
 
 use crate::{handle_connection::PlayerAction, send_to_player::send_msg_to_player};
@@ -37,12 +40,14 @@ pub enum MsgToPlayer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
     number_of_players: u32,
+    turn_duration_ms: u32,
 }
 
 pub struct Game {
     game_name: String,
     to_game_rx: Receiver<PlayerAction>,
     game_settings: GameSettings,
+    turns: u32,
     players: HashMap<Uuid, Player>,
 }
 
@@ -56,16 +61,18 @@ impl Game {
             game_name,
             to_game_rx,
             game_settings,
+            turns: 0,
             players: HashMap::new(),
         }
     }
 
     fn p(&self) -> String {
         format!(
-            "Game `{}` (`{}`/`{}`)",
+            "Game `{}` ({}/{}) #{}",
             self.game_name,
             self.players.len(),
-            self.game_settings.number_of_players
+            self.game_settings.number_of_players,
+            self.turns,
         )
     }
 
@@ -123,7 +130,8 @@ impl Game {
 
         // Everyone is Connected, Notify the Players
         println!(
-            "Everyone (`{}`/`{}`) is Connected to the Game `{}`, the Game Starts!",
+            "{} Everyone (`{}`/`{}`) is Connected to the Game `{}`, the Game Starts!",
+            self.p(),
             self.game_settings.number_of_players,
             self.players.len(),
             self.game_name
@@ -134,42 +142,68 @@ impl Game {
     }
 
     async fn game_loop(&mut self) {
-        // TODO: Accept Actions for a duration then run the turn
-        while let Some(player_action) = self.to_game_rx.recv().await {
+        let turn_duration = Duration::from_millis(self.game_settings.turn_duration_ms as u64);
+        loop {
+            self.turns += 1;
             let p = self.p();
 
-            let player = match self.players.get_mut(&player_action.player_uuid) {
-                Some(player) => player,
-                None => {
-                    eprintln!("{} Player `{}` tried to do Action `{:?}`, but they are not Connected to the Game!", p, player_action.player_uuid, player_action.action);
-                    continue;
-                }
-            };
-
-            match player_action.action {
-                Action::__Connect__ {
+            // Collect the Player Actions for the turn
+            let mut player_actions = HashMap::<Uuid, Action>::new();
+            while let Ok(Some(player_action)) = timeout(turn_duration, self.to_game_rx.recv()).await
+            {
+                if let Action::__Connect__ {
                     player_name,
                     mut to_player_tx,
-                } => match self.players.entry(player_action.player_uuid) {
-                    Entry::Occupied(mut occupied_entry) => {
-                        println!("{} Player `{}` Reconnected", p, player_name);
-                        occupied_entry.insert(Player::new(player_name, to_player_tx.clone()));
-                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::Reconnected).await;
-                    }
-                    Entry::Vacant(_vacant_entry) => {
-                        // This is unreachable, because the Player guard on top of the game_loop
-                        eprintln!(
+                } = player_action.action
+                {
+                    match self.players.entry(player_action.player_uuid) {
+                        Entry::Occupied(mut occupied_entry) => {
+                            println!("{} Player `{}` Reconnected", p, player_name);
+                            occupied_entry.insert(Player::new(player_name, to_player_tx.clone()));
+                            send_msg_to_player(&mut to_player_tx, MsgToPlayer::Reconnected).await;
+                        }
+                        Entry::Vacant(_vacant_entry) => {
+                            // This is unreachable, because the Player guard on top of the game_loop
+                            eprintln!(
                             "{} Player `{}` tried to connect to the game, but it is already full!",
                             p, player_name
                         );
-                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull).await;
+                            send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull).await;
+                        }
                     }
-                },
+                    continue; // Connect Action is not counted towards this turn
+                }
+                // Players can overwrite their own action
+                player_actions.insert(player_action.player_uuid, player_action.action);
 
-                Action::Idle => {
-                    send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Idle).await
+                // If all player did an action we can fastforward to the processing of the turn
+                if player_actions.len() == self.players.len() {
+                    break;
                 }
             }
+
+            // Process Player Actions for the turn
+            for (player_uuid, action) in player_actions {
+                let player = match self.players.get_mut(&player_uuid) {
+                    Some(player) => player,
+                    None => {
+                        eprintln!("{} Player `{}` tried to do Action `{:?}`, but they are not Connected to the Game!", p, player_uuid, action);
+                        continue;
+                    }
+                };
+
+                match action {
+                    Action::Idle => {
+                        send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Idle).await
+                    }
+                    Action::__Connect__ {
+                        player_name: _,
+                        to_player_tx: _,
+                    } => unreachable!(),
+                }
+            }
+
+            println!("{} Next turn!", self.p());
         }
     }
 }

@@ -1,4 +1,4 @@
-{ "NewGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 2 } } }
+{ "NewGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 2, "turn_duration_ms" : 10000 } } }
 { "JoinGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name": "Game1" } }
 
 
