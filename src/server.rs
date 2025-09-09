@@ -9,7 +9,6 @@ use tokio_util::codec::{Framed, LinesCodec};
 
 use crate::handle_connection::{handle_connection, PlayerAction};
 
-pub type FramedConnection = Framed<TcpStream, LinesCodec>;
 pub type Games = Arc<DashMap<String, Sender<PlayerAction>>>;
 
 pub async fn start_server(ip_port: &str) {
@@ -19,6 +18,7 @@ pub async fn start_server(ip_port: &str) {
     println!("Listening on {}", ip_port);
 
     let games: Games = Arc::new(DashMap::new());
+    // TODO: Remove Game from games when its over
 
     while let Ok((socket, _addr)) = listener.accept().await {
         let framed = Framed::new(socket, LinesCodec::new());

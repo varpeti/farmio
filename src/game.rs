@@ -1,51 +1,189 @@
 use rand::{rngs::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    time::Duration,
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 
-use crate::handle_connection::PlayerAction;
+use crate::{handle_connection::PlayerAction, send_to_player::send_msg_to_player};
 
 #[derive(Debug, Deserialize)]
 pub enum Action {
-    //Idle,
+    Idle,
     #[serde(skip_deserializing)]
     __Connect__ {
         player_name: String,
         to_player_tx: Sender<String>,
     },
+    // TODO: __Disconnect__
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GameSettings {}
+#[derive(Debug, Serialize)]
+pub enum MsgToPlayer {
+    Connected {
+        game_settings: GameSettings,
+        players_connected: u32,
+    },
+    AlreadyConnected,
+    Reconnected,
+    WaitingOtherPlayersToJoin,
+    GameIsFull,
+    GameStarted,
+    Idle, // TODO: with current state
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameSettings {
+    number_of_players: u32,
+}
 
 pub struct Game {
     game_name: String,
     to_game_rx: Receiver<PlayerAction>,
+    game_settings: GameSettings,
+    players: HashMap<Uuid, Player>,
 }
 
 impl Game {
-    pub fn new(game_name: String, to_game_rx: Receiver<PlayerAction>) -> Self {
+    pub fn new(
+        game_name: String,
+        to_game_rx: Receiver<PlayerAction>,
+        game_settings: GameSettings,
+    ) -> Self {
         Self {
             game_name,
             to_game_rx,
+            game_settings,
+            players: HashMap::new(),
         }
     }
 
+    fn p(&self) -> String {
+        format!(
+            "Game `{}` (`{}`/`{}`)",
+            self.game_name,
+            self.players.len(),
+            self.game_settings.number_of_players
+        )
+    }
+
     pub async fn run(&mut self) {
+        self.wait_for_connections().await;
+        self.game_loop().await;
+        // TODO: Kill the game if all players are disconnecting
+    }
+
+    async fn wait_for_connections(&mut self) {
         while let Some(player_action) = self.to_game_rx.recv().await {
+            let p = self.p();
             if let Action::__Connect__ {
                 player_name,
-                to_player_tx: response_tx,
+                mut to_player_tx,
             } = player_action.action
             {
-                if let Err(err) = response_tx.send("Connected".to_string()).await {
-                    eprintln!(
-                        "Unable to send message to Player `{}`: `{}`",
-                        player_name, err
-                    );
+                let players_connected = self.players.len() as u32;
+                match self.players.entry(player_action.player_uuid) {
+                    Entry::Occupied(_occupied_entry) => {
+                        eprintln!("{} Player `{}` Already Connected", p, player_name,);
+                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::AlreadyConnected).await;
+                    }
+                    Entry::Vacant(vacant_entry) => {
+                        let player = vacant_entry.insert(Player::new(player_name, to_player_tx));
+                        println!("{} Player `{}` Connected", p, player.player_name);
+                        send_msg_to_player(
+                            &mut player.to_player_tx,
+                            MsgToPlayer::Connected {
+                                game_settings: self.game_settings.clone(),
+                                players_connected: players_connected + 1,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                if self.players.len() as u32 == self.game_settings.number_of_players {
+                    break;
+                }
+            } else if let Some(player) = self.players.get_mut(&player_action.player_uuid) {
+                println!(
+                    "Player `{}` sent non __Connect__ Action `{:?}` in wait_for_connections phase in Game `{}`",
+                    player_action.player_uuid, player_action.action , self.game_name
+                );
+                send_msg_to_player(
+                    &mut player.to_player_tx,
+                    MsgToPlayer::WaitingOtherPlayersToJoin,
+                )
+                .await;
+            } else {
+                eprintln!("Player `{}` is not connected and sent non __Connect__ Action `{:?}` in wait_for_connections pahse in Game `{}` ", 
+                    player_action.player_uuid, player_action.action, self.game_name);
+            }
+        }
+
+        // Everyone is Connected, Notify the Players
+        println!(
+            "Everyone (`{}`/`{}`) is Connected to the Game `{}`, the Game Starts!",
+            self.game_settings.number_of_players,
+            self.players.len(),
+            self.game_name
+        );
+        for (_player_uuid, player) in self.players.iter_mut() {
+            send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::GameStarted).await;
+        }
+    }
+
+    async fn game_loop(&mut self) {
+        // TODO: Accept Actions for a duration then run the turn
+        while let Some(player_action) = self.to_game_rx.recv().await {
+            let p = self.p();
+
+            let player = match self.players.get_mut(&player_action.player_uuid) {
+                Some(player) => player,
+                None => {
+                    eprintln!("{} Player `{}` tried to do Action `{:?}`, but they are not Connected to the Game!", p, player_action.player_uuid, player_action.action);
+                    continue;
+                }
+            };
+
+            match player_action.action {
+                Action::__Connect__ {
+                    player_name,
+                    mut to_player_tx,
+                } => match self.players.entry(player_action.player_uuid) {
+                    Entry::Occupied(mut occupied_entry) => {
+                        println!("{} Player `{}` Reconnected", p, player_name);
+                        occupied_entry.insert(Player::new(player_name, to_player_tx.clone()));
+                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::Reconnected).await;
+                    }
+                    Entry::Vacant(_vacant_entry) => {
+                        // This is unreachable, because the Player guard on top of the game_loop
+                        eprintln!(
+                            "{} Player `{}` tried to connect to the game, but it is already full!",
+                            p, player_name
+                        );
+                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull).await;
+                    }
+                },
+
+                Action::Idle => {
+                    send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Idle).await
                 }
             }
+        }
+    }
+}
+
+struct Player {
+    player_name: String,
+    to_player_tx: Sender<String>,
+}
+
+impl Player {
+    fn new(player_name: String, to_player_tx: Sender<String>) -> Self {
+        Self {
+            player_name,
+            to_player_tx,
         }
     }
 }

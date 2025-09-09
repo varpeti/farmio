@@ -1,10 +1,15 @@
 use futures::SinkExt;
 use serde::Serialize;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::{
+    net::TcpStream,
+    sync::mpsc::{Receiver, Sender},
+};
+use tokio_util::codec::{Framed, LinesCodec};
 
-use crate::handle_connection::TcpSender;
-
-pub async fn send_to_player(mut to_player_rx: Receiver<String>, mut tcp_tx: TcpSender) {
+pub async fn send_to_player(
+    mut to_player_rx: Receiver<String>,
+    mut tcp_tx: futures::stream::SplitSink<Framed<TcpStream, LinesCodec>, String>,
+) {
     while let Some(msg) = to_player_rx.recv().await {
         if let Err(err) = tcp_tx.send(msg).await {
             eprintln!("Unable to send Msg to Player! (send_to_player): `{}`", err);
