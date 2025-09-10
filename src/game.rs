@@ -18,6 +18,15 @@ pub enum Action {
     Move {
         direction: Direction,
     },
+    Harvest,
+    Plant {
+        seed: Seed,
+    },
+    Trade {
+        seed: Seed,
+        volume: u32,
+    },
+    Till,
     #[serde(skip_deserializing)]
     __Connect__ {
         player_name: String,
@@ -41,6 +50,8 @@ pub enum MsgToPlayer {
     Idled,
     Moved,
     BlockedBy(BlockedBy),
+    Harvested,
+    NoHarvest,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,8 +63,9 @@ pub enum BlockedBy {
 pub struct MsgToPlayerWithGameContent {
     result: MsgToPlayer,
     cell: Cell,
-    harvested: HashMap<Resource, u32>,
-    to_plant: HashMap<Plant, u32>,
+    harvest: HashMap<Harvest, u32>,
+    seed: HashMap<Seed, u32>,
+    score: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +186,7 @@ impl Game {
     }
 
     async fn game_loop(&mut self) {
+        // TODO: clean up this enourmous function, break it into smaller ones
         let turn_duration = Duration::from_millis(self.game_settings.turn_duration_ms as u64);
         loop {
             self.turns += 1;
@@ -219,6 +232,7 @@ impl Game {
             // Process Player Actions for the turn
 
             let mut next_positions = HashMap::<Pos, Vec<Uuid>>::new();
+
             for (player_uuid, action) in player_actions {
                 let player = match self.players.get_mut(&player_uuid) {
                     Some(player) => player,
@@ -228,6 +242,7 @@ impl Game {
                     }
                 };
 
+                // TODO: Make each action a separat function or something
                 match action {
                     Action::Idle => {
                         msg_to_player_with_game_content(&self.map, player, MsgToPlayer::Idled)
@@ -247,6 +262,37 @@ impl Game {
                             }
                         }
                     }
+                    Action::Harvest => {
+                        let pos = player.pos.clone();
+                        let mut cell = self.map[pos.y as usize][pos.x as usize].clone();
+                        let msg_to_player =
+                            if let Some((harvest, volume, points)) = harvest(&cell.plant) {
+                                match player.harvest.entry(harvest) {
+                                    Entry::Occupied(occupied_entry) => {
+                                        *occupied_entry.into_mut() += volume;
+                                    }
+                                    Entry::Vacant(vacant_entry) => {
+                                        vacant_entry.insert(volume);
+                                    }
+                                }
+                                player.score += points;
+
+                                MsgToPlayer::Harvested
+                            } else {
+                                MsgToPlayer::NoHarvest
+                            };
+
+                        cell.plant = if let Ground::Dirt = cell.ground {
+                            Plant::Wheat { growth: 0 }
+                        } else {
+                            Plant::None
+                        };
+                        self.map[pos.y as usize][pos.x as usize] = cell;
+                        msg_to_player_with_game_content(&self.map, player, msg_to_player).await;
+                    }
+                    Action::Plant { seed } => todo!(),
+                    Action::Trade { seed, volume } => todo!(),
+                    Action::Till => todo!(),
                     Action::__Connect__ {
                         player_name: _,
                         to_player_tx: _,
@@ -287,8 +333,9 @@ struct Player {
     player_name: String,
     to_player_tx: Sender<String>,
     pos: Pos,
-    harvested: HashMap<Resource, u32>,
-    to_plant: HashMap<Plant, u32>,
+    harvest: HashMap<Harvest, u32>,
+    seeds: HashMap<Seed, u32>,
+    score: u32,
 }
 
 impl Player {
@@ -301,8 +348,9 @@ impl Player {
                 x: rng.random_range(0..map_size),
                 y: rng.random_range(0..map_size),
             },
-            harvested: HashMap::new(),
-            to_plant: HashMap::new(),
+            harvest: HashMap::new(),
+            seeds: HashMap::new(),
+            score: 0,
         }
     }
 }
@@ -347,7 +395,7 @@ fn get_cell(map: &Map, pos: &Pos) -> Cell {
     );
     Cell {
         ground: Ground::Error,
-        plant: Plant::Error,
+        plant: Plant::None,
     }
 }
 
@@ -364,6 +412,45 @@ enum Ground {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Plant {
     None,
+    Wheat {
+        growth: u8,
+    },
+    Bush {
+        growth: u8,
+        berries: u8,
+        berries_growth: u8,
+    },
+    Tree {
+        growth: u8,
+    },
+    Cane {
+        growth: u8,
+    },
+    Pupkin {
+        growth: u8,
+        size: u32,
+    },
+    Cactus {
+        growth: u8,
+        size: u8,
+        next_growth: u8,
+    },
+    Wallbush {
+        growth: u8,
+        health: u8,
+    },
+    Swapshroom {
+        growth: u8,
+        pair_id: Uuid,
+    },
+    Sunflower {
+        growth: u8,
+        rank: u8,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Seed {
     Wheat,
     Bush,
     Tree,
@@ -373,11 +460,10 @@ enum Plant {
     Wallbush,
     Swapshroom,
     Sunflower,
-    Error,
 }
 
-#[derive(Debug, Clone, Serialize)]
-enum Resource {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub enum Harvest {
     Grains,
     Berry,
     Wood,
@@ -385,6 +471,55 @@ enum Resource {
     PumpkinSeeds,
     CactusMeat,
     Power,
+}
+
+// TODO: we need to &mut access the map and players here
+fn harvest(plant: &Plant) -> Option<(Harvest, u32, u32)> {
+    match plant {
+        Plant::None => None,
+        Plant::Wheat { growth } => {
+            if *growth != 255u8 {
+                return None;
+            }
+            Some((Harvest::Grains, 1, 1 * 1))
+        }
+        Plant::Bush {
+            growth,
+            berries,
+            berries_growth: _,
+        } => {
+            if *growth != 255u8 {
+                return None;
+            }
+
+            if *berries > 0u8 {
+                Some((Harvest::Berry, *berries as u32, *berries as u32))
+            } else {
+                Some((Harvest::Wood, 1, 1 * 1))
+            }
+        }
+        Plant::Tree { growth } => {
+            if *growth != 255u8 {
+                return None;
+            }
+            Some((Harvest::Wood, 16, 16 * 1))
+        }
+        Plant::Cane { growth } => {
+            if *growth != 255u8 {
+                return None;
+            }
+            Some((Harvest::Sugar, 3, 3 * 2))
+        }
+        Plant::Pupkin { growth, size } => todo!(),
+        Plant::Cactus {
+            growth,
+            size,
+            next_growth: _,
+        } => todo!(),
+        Plant::Wallbush { growth, health } => todo!(),
+        Plant::Swapshroom { growth, pair_id } => todo!(),
+        Plant::Sunflower { growth, rank } => todo!(),
+    }
 }
 
 fn generate_map(map_size: usize) -> Map {
@@ -405,11 +540,15 @@ fn random_ground(rng: &mut ThreadRng) -> Cell {
     let cell = match rng.random_range(0..99) {
         0..70 => Cell {
             ground: Ground::Dirt,
-            plant: Plant::Wheat,
+            plant: Plant::Wheat { growth: 255 },
         },
         70..75 => Cell {
-            ground: Ground::Dirt,
-            plant: Plant::Bush,
+            ground: Ground::Tiled,
+            plant: Plant::Bush {
+                growth: 255,
+                berries: 4,
+                berries_growth: 0,
+            },
         },
         75..90 => Cell {
             ground: Ground::Sand,
@@ -417,7 +556,7 @@ fn random_ground(rng: &mut ThreadRng) -> Cell {
         },
         90..95 => Cell {
             ground: Ground::Sand,
-            plant: Plant::Cane,
+            plant: Plant::Cane { growth: 255 },
         },
         95..99 => Cell {
             ground: Ground::Water,
@@ -455,8 +594,9 @@ async fn msg_to_player_with_game_content(map: &Map, player: &mut Player, result:
     let msg = MsgToPlayerWithGameContent {
         result,
         cell: get_cell(map, &player.pos),
-        harvested: player.harvested.clone(),
-        to_plant: player.to_plant.clone(),
+        harvest: player.harvest.clone(),
+        seed: player.seeds.clone(),
+        score: player.score,
     };
     send_msg_to_player(&mut player.to_player_tx, msg).await;
 }
