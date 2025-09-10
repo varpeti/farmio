@@ -15,6 +15,9 @@ use crate::{handle_connection::PlayerAction, send_to_player::send_msg_to_player}
 #[derive(Debug, Deserialize)]
 pub enum Action {
     Idle,
+    Move {
+        direction: Direction,
+    },
     #[serde(skip_deserializing)]
     __Connect__ {
         player_name: String,
@@ -34,13 +37,30 @@ pub enum MsgToPlayer {
     WaitingOtherPlayersToJoin,
     GameIsFull,
     GameStarted,
-    Idle, // TODO: with current state
+    // TODO: with current state
+    Idled,
+    Moved,
+    BlockedBy(BlockedBy),
+}
+
+#[derive(Debug, Serialize)]
+pub enum BlockedBy {
+    AnotherPlayer,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MsgToPlayerWithGameContent {
+    result: MsgToPlayer,
+    cell: Cell,
+    harvested: HashMap<Resource, u32>,
+    to_plant: HashMap<Plant, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
     number_of_players: u32,
     turn_duration_ms: u32,
+    map_size: u32,
 }
 
 pub struct Game {
@@ -49,6 +69,7 @@ pub struct Game {
     game_settings: GameSettings,
     turns: u32,
     players: HashMap<Uuid, Player>,
+    map: Map,
 }
 
 impl Game {
@@ -57,12 +78,15 @@ impl Game {
         to_game_rx: Receiver<PlayerAction>,
         game_settings: GameSettings,
     ) -> Self {
+        let players = HashMap::new();
+        let map = generate_map(game_settings.map_size as usize);
         Self {
             game_name,
             to_game_rx,
             game_settings,
             turns: 0,
-            players: HashMap::new(),
+            players,
+            map,
         }
     }
 
@@ -97,7 +121,15 @@ impl Game {
                         send_msg_to_player(&mut to_player_tx, MsgToPlayer::AlreadyConnected).await;
                     }
                     Entry::Vacant(vacant_entry) => {
-                        let player = vacant_entry.insert(Player::new(player_name, to_player_tx));
+                        let player = vacant_entry.insert(Player::new(
+                            player_name,
+                            to_player_tx,
+                            self.game_settings.map_size as i32,
+                        ));
+                        self.map[player.pos.y as usize][player.pos.x as usize] = Cell {
+                            ground: Ground::Stone,
+                            plant: Plant::None,
+                        };
                         println!("{} Player `{}` Connected", p, player.player_name);
                         send_msg_to_player(
                             &mut player.to_player_tx,
@@ -157,10 +189,12 @@ impl Game {
                 } = player_action.action
                 {
                     match self.players.entry(player_action.player_uuid) {
-                        Entry::Occupied(mut occupied_entry) => {
+                        Entry::Occupied(occupied_entry) => {
+                            let player = occupied_entry.into_mut();
                             println!("{} Player `{}` Reconnected", p, player_name);
-                            occupied_entry.insert(Player::new(player_name, to_player_tx.clone()));
-                            send_msg_to_player(&mut to_player_tx, MsgToPlayer::Reconnected).await;
+                            player.to_player_tx = to_player_tx;
+                            send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Reconnected)
+                                .await;
                         }
                         Entry::Vacant(_vacant_entry) => {
                             // This is unreachable, because the Player guard on top of the game_loop
@@ -183,6 +217,8 @@ impl Game {
             }
 
             // Process Player Actions for the turn
+
+            let mut next_positions = HashMap::<Pos, Vec<Uuid>>::new();
             for (player_uuid, action) in player_actions {
                 let player = match self.players.get_mut(&player_uuid) {
                     Some(player) => player,
@@ -194,12 +230,51 @@ impl Game {
 
                 match action {
                     Action::Idle => {
-                        send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Idle).await
+                        msg_to_player_with_game_content(&self.map, player, MsgToPlayer::Idled)
+                            .await;
+                    }
+                    Action::Move { direction } => {
+                        // Collect Players desired movement
+                        let next_pos = player
+                            .pos
+                            .get_next_pos_on_map(direction, self.game_settings.map_size as i32);
+                        match next_positions.entry(next_pos) {
+                            Entry::Occupied(occupied_entry) => {
+                                occupied_entry.into_mut().push(player_uuid);
+                            }
+                            Entry::Vacant(vacant_entry) => {
+                                vacant_entry.insert(vec![player_uuid]);
+                            }
+                        }
                     }
                     Action::__Connect__ {
                         player_name: _,
                         to_player_tx: _,
                     } => unreachable!(),
+                }
+            }
+
+            // Move Players if possible
+            for (pos, uuids) in next_positions {
+                if uuids.len() == 1 {
+                    let player = self.players.get_mut(&uuids[0]).unwrap();
+                    player.pos = pos;
+                    msg_to_player_with_game_content(&self.map, player, MsgToPlayer::Moved).await;
+                    // TODO: Remove
+                    println!(
+                        "TODO REMOVE {} Player `{}` moved to pos: {:?}",
+                        p, player.player_name, player.pos
+                    );
+                } else {
+                    for uuid in uuids {
+                        let player = self.players.get_mut(&uuid).unwrap();
+                        msg_to_player_with_game_content(
+                            &self.map,
+                            player,
+                            MsgToPlayer::BlockedBy(BlockedBy::AnotherPlayer),
+                        )
+                        .await;
+                    }
                 }
             }
 
@@ -211,310 +286,177 @@ impl Game {
 struct Player {
     player_name: String,
     to_player_tx: Sender<String>,
+    pos: Pos,
+    harvested: HashMap<Resource, u32>,
+    to_plant: HashMap<Plant, u32>,
 }
 
 impl Player {
-    fn new(player_name: String, to_player_tx: Sender<String>) -> Self {
+    fn new(player_name: String, to_player_tx: Sender<String>, map_size: i32) -> Self {
+        let mut rng = rand::rng();
         Self {
             player_name,
             to_player_tx,
+            pos: Pos {
+                x: rng.random_range(0..map_size),
+                y: rng.random_range(0..map_size),
+            },
+            harvested: HashMap::new(),
+            to_plant: HashMap::new(),
         }
     }
 }
 
-//
-// #[derive(Debug, Deserialize)]
-// pub struct PlayerAction {
-//     pub player_uuid: String,
-//     pub action: Action,
-// }
-//
-// #[derive(Debug, Serialize)]
-// pub enum Response {
-//     Idle,
-//     Connected,
-//     GameStarted,
-//     Error(Error),
-// }
-//
-// #[derive(Debug, Serialize)]
-// pub enum Error {
-//     ServerIsFull,
-//     WaitForOtherPlayers,
-// }
-//
-// #[derive(Debug, Deserialize)]
-// pub struct GameSettings {
-//     map_size: u32,
-//     player_count: u32,
-//     turn_duration: Duration,
-// }
-//
-// #[derive(Debug)]
-// pub struct Game<'a> {
-//     //map: Map,
-//     //players: Players,
-//     to_game_rx: &'a mut Receiver<String>,
-//     game_settings: GameSettings,
-// }
-//
-// impl<'a> Game<'a> {
-//     pub fn new(to_game_rx: &'a mut Receiver<String>, game_settings: GameSettings) -> Game {
-//         let mut rng = rand::rng();
-//         Self {
-//             //map: generate_map(map_size as usize, &mut rng),
-//             //players: Players::new(),
-//             to_game_rx,
-//             game_settings,
-//         }
-//     }
-// }
+#[derive(Debug, Deserialize)]
+pub enum Direction {
+    Up,
+    Right,
+    Down,
+    Left,
+}
 
-//     pub async fn run(&mut self) {
-//         // Wait for everyone to join
-//         while let Some(player_action) = self.to_game_rx.recv().await {
-//             self.wait_for_join(player_action).await;
-//             if self.player_count as usize <= self.players.len() {
-//                 for (_, player) in self.players.iter() {
-//                     send_response(
-//                         Response::GameStarted,
-//                         player.response_tx.clone(),
-//                         player.player_name.clone(),
-//                     )
-//                     .await;
-//                 }
-//
-//                 break;
-//             }
-//         }
-//
-//         // Game Loop
-//         while let Some(player_action) = self.to_game_rx.recv().await {
-//             self.handle_player_action(player_action).await;
-//         }
-//     }
-//
-//     async fn wait_for_join(&mut self, player_action: PlayerAction) {
-//         if let Action::__Connect__ {
-//             player_name,
-//             response_tx,
-//         } = player_action.action
-//         {
-//             self.connect_player(player_action.player_uuid, player_name, response_tx)
-//                 .await;
-//         } else if let Some(player) = self.players.get(&player_action.player_uuid) {
-//             eprintln!(
-//                 "Player `{:?}` tried to `{:?}` in wait_for_join phase",
-//                 player.player_name, player_action.action
-//             );
-//             send_response(
-//                 Response::Error(Error::WaitForOtherPlayers),
-//                 player.response_tx.clone(),
-//                 player.player_name.clone(),
-//             )
-//             .await;
-//         } else {
-//             eprintln!(
-//                 "Unconnected Player `{}` tried to `{:?}` in wait_for_join phase",
-//                 player_action.player_uuid, player_action.action
-//             );
-//         };
-//     }
-//
-//     async fn handle_player_action(&mut self, player_action: PlayerAction) {
-//         let player = self.players.get_mut(&player_action.player_uuid);
-//         let response = match (player_action.action, &player) {
-//             (
-//                 Action::__Connect__ {
-//                     player_name,
-//                     response_tx,
-//                 },
-//                 _,
-//             ) => {
-//                 self.connect_player(player_action.player_uuid.clone(), player_name, response_tx)
-//                     .await;
-//                 return; // connect_player sends a response, we maybe don't have a new player
-//             }
-//             (Action::Idle, _) => Response::Idle,
-//         };
-//
-//         if let Some(player) = player {
-//             send_response(
-//                 response,
-//                 player.response_tx.clone(),
-//                 player.player_name.clone(),
-//             )
-//             .await;
-//         }
-//     }
-//
-//     async fn connect_player(
-//         &mut self,
-//         player_uuid: String,
-//         player_name: String,
-//         response_tx: Sender<Response>,
-//     ) {
-//         let response = match (
-//             self.players.len() >= self.player_count as usize,
-//             self.players.contains_key(&player_uuid),
-//         ) {
-//             (_, true) => {
-//                 eprintln!("Player `{}` reconnected!", player_name);
-//                 Response::Connected
-//             }
-//             (true, false) => {
-//                 eprintln!("Player `{}` tried to connect but it is full!", player_name);
-//                 Response::Error(Error::ServerIsFull)
-//             }
-//             (false, false) => {
-//                 self.players.insert(
-//                     player_uuid,
-//                     Player::new_with_random_position(
-//                         response_tx.clone(),
-//                         self.map_size as i32,
-//                         player_name.clone(),
-//                     ),
-//                 );
-//                 eprintln!("Player `{}` connected!", player_name);
-//                 Response::Connected
-//             }
-//         };
-//         send_response(response, response_tx, player_name).await;
-//     }
-// }
-//
-// async fn send_response(response: Response, response_tx: Sender<Response>, player_name: String) {
-//     if let Err(err) = response_tx.send(response).await {
-//         eprintln!(
-//             "Error when sending back Response to Player `{}`: `{}`",
-//             player_name, err
-//         );
-//     }
-// }
-//
-// type Map = Vec<Vec<Cell>>;
-//
-// #[derive(Debug, Serialize)]
-// struct Cell {
-//     ground: Ground,
-//     plant: Plant,
-// }
-//
-// #[derive(Debug, Serialize, Deserialize)]
-// enum Ground {
-//     Dirt,
-//     Tiled,
-//     Sand,
-//     Water,
-//     Stone,
-// }
-//
-// #[derive(Debug, Serialize, Deserialize)]
-// enum Plant {
-//     None,
-//     Wheat,
-//     Bush,
-//     Tree,
-//     Cane,
-//     Pupkin,
-//     Cactus,
-//     Wallbush,
-//     Swapshroom,
-//     Sunflower,
-// }
-//
-// #[derive(Debug, Serialize)]
-// enum Resource {
-//     Grains,
-//     Berry,
-//     Wood,
-//     Sugar,
-//     PumpkinSeeds,
-//     CactusMeat,
-//     Power,
-// }
-//
-// fn generate_map(map_size: usize, rng: &mut ThreadRng) -> Map {
-//     let mut map = Map::with_capacity(map_size);
-//     for _y in 0..map_size {
-//         let mut line = Vec::with_capacity(map_size);
-//         for _x in 0..map_size {
-//             let cell = random_ground(rng);
-//             line.push(cell);
-//         }
-//         map.push(line);
-//     }
-//     map
-// }
-//
-// fn random_ground(rng: &mut ThreadRng) -> Cell {
-//     let cell = match rng.random_range(0..99) {
-//         0..70 => Cell {
-//             ground: Ground::Dirt,
-//             plant: Plant::Wheat,
-//         },
-//         70..75 => Cell {
-//             ground: Ground::Dirt,
-//             plant: Plant::Bush,
-//         },
-//         75..90 => Cell {
-//             ground: Ground::Sand,
-//             plant: Plant::None,
-//         },
-//         90..95 => Cell {
-//             ground: Ground::Sand,
-//             plant: Plant::Cane,
-//         },
-//         95..99 => Cell {
-//             ground: Ground::Water,
-//             plant: Plant::None,
-//         },
-//         num => {
-//             eprintln!("random_ground unreachable generated! `{}`", num);
-//             Cell {
-//                 ground: Ground::Dirt,
-//                 plant: Plant::None,
-//             }
-//         }
-//     };
-//     cell
-// }
-//
-// type Players = HashMap<String, Player>;
-//
-// #[derive(Debug)]
-// struct Player {
-//     response_tx: Sender<Response>,
-//     player_name: String,
-//     pos: Pos,
-//     resources: Vec<Resource>,
-//     plants: Vec<Plant>,
-//     score: u32,
-// }
-//
-// impl Player {
-//     fn new_with_random_position(
-//         response_tx: Sender<Response>,
-//         map_size: i32,
-//         player_name: String,
-//     ) -> Self {
-//         let mut rng = rand::rng();
-//         Player {
-//             response_tx,
-//             player_name,
-//             pos: Pos {
-//                 x: rng.random_range(0..map_size),
-//                 y: rng.random_range(0..map_size),
-//             },
-//             resources: Vec::new(),
-//             plants: Vec::new(),
-//             score: 0,
-//         }
-//     }
-// }
-//
-// #[derive(Debug)]
-// struct Pos {
-//     x: i32,
-//     y: i32,
-// }
+impl Direction {
+    fn to_pos(&self) -> Pos {
+        match self {
+            Direction::Up => Pos { x: 0, y: -1 },
+            Direction::Right => Pos { x: 1, y: 0 },
+            Direction::Down => Pos { x: 0, y: 1 },
+            Direction::Left => Pos { x: -1, y: 0 },
+        }
+    }
+}
+
+type Map = Vec<Vec<Cell>>;
+
+#[derive(Debug, Clone, Serialize)]
+struct Cell {
+    ground: Ground,
+    plant: Plant,
+}
+
+fn get_cell(map: &Map, pos: &Pos) -> Cell {
+    if let Some(line) = map.get(pos.y as usize) {
+        if let Some(cell) = line.get(pos.x as usize) {
+            return cell.to_owned();
+        }
+    }
+    eprintln!(
+        "Error: Pos `{:?}` is not present in the Map `{map_size}x{map_size}`",
+        pos,
+        map_size = map.len(),
+    );
+    Cell {
+        ground: Ground::Error,
+        plant: Plant::Error,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Ground {
+    Dirt,
+    Tiled,
+    Sand,
+    Water,
+    Stone,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Plant {
+    None,
+    Wheat,
+    Bush,
+    Tree,
+    Cane,
+    Pupkin,
+    Cactus,
+    Wallbush,
+    Swapshroom,
+    Sunflower,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+enum Resource {
+    Grains,
+    Berry,
+    Wood,
+    Sugar,
+    PumpkinSeeds,
+    CactusMeat,
+    Power,
+}
+
+fn generate_map(map_size: usize) -> Map {
+    let mut rng = rand::rng();
+    let mut map = Map::with_capacity(map_size);
+    for _y in 0..map_size {
+        let mut line = Vec::with_capacity(map_size);
+        for _x in 0..map_size {
+            let cell = random_ground(&mut rng);
+            line.push(cell);
+        }
+        map.push(line);
+    }
+    map
+}
+
+fn random_ground(rng: &mut ThreadRng) -> Cell {
+    let cell = match rng.random_range(0..99) {
+        0..70 => Cell {
+            ground: Ground::Dirt,
+            plant: Plant::Wheat,
+        },
+        70..75 => Cell {
+            ground: Ground::Dirt,
+            plant: Plant::Bush,
+        },
+        75..90 => Cell {
+            ground: Ground::Sand,
+            plant: Plant::None,
+        },
+        90..95 => Cell {
+            ground: Ground::Sand,
+            plant: Plant::Cane,
+        },
+        95..99 => Cell {
+            ground: Ground::Water,
+            plant: Plant::None,
+        },
+        num => {
+            eprintln!("random_ground unreachable generated! `{}`", num);
+            Cell {
+                ground: Ground::Dirt,
+                plant: Plant::None,
+            }
+        }
+    };
+    cell
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Pos {
+    x: i32,
+    y: i32,
+}
+
+impl Pos {
+    // The map is a doughnut 🍩
+    fn get_next_pos_on_map(&self, direction: Direction, map_size: i32) -> Self {
+        let dp = direction.to_pos();
+        Self {
+            x: (self.x + dp.x).rem_euclid(map_size),
+            y: (self.y + dp.y).rem_euclid(map_size),
+        }
+    }
+}
+
+async fn msg_to_player_with_game_content(map: &Map, player: &mut Player, result: MsgToPlayer) {
+    let msg = MsgToPlayerWithGameContent {
+        result,
+        cell: get_cell(map, &player.pos),
+        harvested: player.harvested.clone(),
+        to_plant: player.to_plant.clone(),
+    };
+    send_msg_to_player(&mut player.to_player_tx, msg).await;
+}

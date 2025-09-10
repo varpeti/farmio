@@ -1,4 +1,4 @@
-{ "NewGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 2, "turn_duration_ms" : 10000 } } }
+{ "NewGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 1, "turn_duration_ms" : 10000, "map_size" : 16 } } }
 { "JoinGame" : { "player_name" : "Player1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name": "Game1" } }
 
 
@@ -6,3 +6,6 @@
 
 
 { "JoinGame" : { "player_name" : "Player3", "player_uuid" : "dc0b855b-ae92-45fd-9da8-ede09175371e", "game_name": "Game1" } }
+
+
+{ "Move" : { "direction" : "Up" } }
