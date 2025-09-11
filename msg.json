@@ -9,4 +9,7 @@
 
 
 { "Move" : { "direction" : "Up" } }
+{ "Move" : { "direction" : "Right" } }
+{ "Move" : { "direction" : "Down" } }
+{ "Move" : { "direction" : "Left" } }
 "Harvest"
