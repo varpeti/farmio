@@ -1,9 +1,10 @@
-use crate::server::start_server;
-
 mod game;
 mod handle_connection;
+mod map;
 mod send_to_player;
 mod server;
+
+use crate::server::start_server;
 
 #[tokio::main]
 async fn main() {
