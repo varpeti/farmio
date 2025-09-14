@@ -1,7 +1,7 @@
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap},
     time::Duration,
 };
 use tokio::{
@@ -11,6 +11,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    dawing::Drawer,
     handle_connection::PlayerAction,
     map::{Cell, Direction, GameConsts, Ground, Harvest, Map, Plant, Pos, Seed},
     send_to_player::send_msg_to_player,
@@ -41,6 +42,7 @@ pub enum Action {
 
 #[derive(Debug, Serialize)]
 pub enum MsgToPlayer {
+    // Admin
     Connected {
         game_settings: GameSettings,
         players_connected: u32,
@@ -50,15 +52,29 @@ pub enum MsgToPlayer {
     WaitingOtherPlayersToJoin,
     GameIsFull,
     GameStarted,
-    // TODO: with current state
+    // Idle
     Idled,
+    // Move
     Moved,
     BlockedBy(BlockedBy),
+    // Harvest
     Harvested {
         harvest: Harvest,
         volume: u32,
     },
     NoHarvest,
+    // Plant
+    Planted,
+    NotEnoughSeed,
+    WrongGroundType,
+    InvalidSwapshroomUuid,
+    // Trade
+    Traded,
+    NotEnoughHarvest,
+    InvalidTrade,
+    // Till
+    Tilled,
+    //WrongGroundType,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,19 +107,22 @@ pub struct Game {
     rng: SmallRng,
     players: HashMap<Uuid, Player>,
     map: Map,
+    drawer: Drawer,
 }
 
 impl Game {
-    pub fn new(
+    pub async fn new(
         game_name: String,
         to_game_rx: Receiver<PlayerAction>,
         game_settings: GameSettings,
     ) -> Self {
+        // TODO: Check if all players could fit in the map
         let mut rng = rand::rngs::SmallRng::seed_from_u64(game_settings.seed);
         let players = HashMap::new();
+        let mut drawer = Drawer::new(game_name.clone()).await;
         let map = Map::generate_map(game_settings.map_size as usize, &mut rng);
-        map.print_map_with_players(&HashMap::new());
-        // TODO: Check if all players could fit in the map
+        map.print_map_with_players(&mut drawer, &HashMap::new())
+            .await;
         Self {
             game_name,
             to_game_rx,
@@ -112,6 +131,7 @@ impl Game {
             rng,
             players,
             map,
+            drawer,
         }
     }
 
@@ -217,13 +237,16 @@ impl Game {
             self.map.update_map();
             // TODO: use log instead of prints, or separate the prints form drawing
             println!("{}", self.p());
-            self.map.print_map_with_players(
-                &self
-                    .players
-                    .values()
-                    .map(|p| (p.pos.clone(), p.player_name.clone()))
-                    .collect(),
-            );
+            self.map
+                .print_map_with_players(
+                    &mut self.drawer,
+                    &self
+                        .players
+                        .values()
+                        .map(|p| (p.pos.clone(), p.player_name.clone()))
+                        .collect(),
+                )
+                .await;
             self.turns += 1;
         }
     }
@@ -295,9 +318,13 @@ impl Game {
                     );
                 }
                 Action::Harvest => action_harvest(&mut self.map, player).await,
-                Action::Plant { seed } => todo!(),
-                Action::Trade { seed, volume } => todo!(),
-                Action::Till => todo!(),
+                Action::Plant { seed } => {
+                    action_plant(&mut self.map, player, seed, &mut self.rng).await
+                }
+                Action::Trade { seed, volume } => {
+                    action_trade(&mut self.map, player, seed, volume).await
+                }
+                Action::Till => action_till(&mut self.map, player).await,
                 Action::__Connect__ {
                     player_name: _,
                     to_player_tx: _,
@@ -414,8 +441,18 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Pumpkin { growth, size } => {
-            todo!()
+        Plant::Pumpkin {
+            growth,
+            curent_size,
+            max_size: _,
+        } => {
+            if growth >= GameConsts::G_PUMPKIN_PUMPKINSEED {
+                cell.plant = Plant::None;
+                player.harvest(Harvest::PumpkinSeed, (curent_size * curent_size) as u32)
+            } else {
+                cell.plant = Plant::None;
+                MsgToPlayer::NoHarvest
+            }
         }
         Plant::Cactus { growth, size } => {
             if growth >= GameConsts::G_CACTUS_CACTUSMEAT {
@@ -435,19 +472,200 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
             if active {
                 todo!();
             } else {
+                // It remains
                 MsgToPlayer::NoHarvest
             }
         }
         Plant::Sunflower { growth, rank } => {
             if growth == GameConsts::G_SUNFLOWER_POWER {
                 todo!()
+            } else {
+                // It remains
+                MsgToPlayer::NoHarvest
             }
-            todo!()
         }
     };
 
     map.set_cell(&player.pos, cell);
     msg_to_player_with_game_content(map, player, msg_to_player).await;
+}
+
+async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut SmallRng) {
+    if let Some(volume) = player.seeds.get_mut(&seed) {
+        if *volume == 0 {
+            return msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughSeed).await;
+        }
+        *volume -= 1;
+        let mut cell = map.get_cell(&player.pos).to_owned();
+        let plant = match (seed, cell.clone().ground) {
+            (Seed::Wheat, Ground::Dirt | Ground::Tiled) => Plant::Wheat { growth: 0 },
+            (Seed::Bush, Ground::Tiled) => Plant::Bush {
+                growth: 0,
+                berries: 0,
+            },
+            (Seed::Tree, Ground::Dirt) => Plant::Tree { growth: 0 },
+            (Seed::Cane, Ground::Sand) => Plant::Cane { growth: 0 },
+            (Seed::Pupkin, Ground::Tiled) => Plant::Pumpkin {
+                growth: 0,
+                curent_size: 1,
+                max_size: 1,
+            },
+            (Seed::Cactus, Ground::Sand) => Plant::Cactus { growth: 0, size: 0 },
+            (Seed::Wallbush, Ground::Tiled) => Plant::Wallbush {
+                growth: 0,
+                health: GameConsts::MAX_WALLBUSH_HEALTH,
+            },
+            (Seed::Swapshroom { pair_id }, _) => {
+                if let Some(pair_id) = pair_id {
+                    Plant::Swapshroom {
+                        pair_id,
+                        active: false,
+                    }
+                } else {
+                    return msg_to_player_with_game_content(
+                        map,
+                        player,
+                        MsgToPlayer::InvalidSwapshroomUuid,
+                    )
+                    .await;
+                }
+            }
+            (Seed::Sunflower, Ground::Stone) => {
+                let stones = map.get_stones();
+                for pos in stones {
+                    let mut cell = map.get_cell(&pos).to_owned();
+                    // Overwriting the existing ones, maybe skip if already has Sunflower?
+                    // By overwriteing a player gets "Notified" by inspecting the rank again
+                    // By not overwriteing a player can cause another player to fail (if lucky)
+                    cell.plant = Plant::Sunflower {
+                        growth: 0,
+                        rank: rng.random_range(u8::MIN..u8::MAX),
+                    };
+                    map.set_cell(&pos, cell);
+                }
+                return msg_to_player_with_game_content(map, player, MsgToPlayer::Planted).await;
+            }
+            (_seed, _ground) => {
+                return msg_to_player_with_game_content(map, player, MsgToPlayer::WrongGroundType)
+                    .await;
+            }
+        };
+        cell.plant = plant;
+        map.set_cell(&player.pos, cell);
+        return msg_to_player_with_game_content(map, player, MsgToPlayer::Planted).await;
+    }
+    msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughSeed).await;
+}
+
+async fn action_trade(map: &mut Map, player: &mut Player, seed: Seed, volume: u32) {
+    if volume == 0 {
+        return msg_to_player_with_game_content(map, player, MsgToPlayer::InvalidTrade).await;
+    }
+
+    let trade = match seed {
+        Seed::Wheat => {
+            return msg_to_player_with_game_content(map, player, MsgToPlayer::InvalidTrade).await
+        }
+        Seed::Bush => vec![(Harvest::Grains, GameConsts::T_GRAINS_BUSH)],
+        Seed::Tree => vec![(Harvest::Wood, GameConsts::T_WOOD_TREE)],
+        Seed::Cane => vec![(Harvest::Grains, GameConsts::T_GRAINS_CANE)],
+        Seed::Pupkin => vec![
+            (Harvest::Berry, GameConsts::T_BERRIES_PUMPKIN),
+            (Harvest::Wood, GameConsts::T_WOOD_PUMPKIN),
+        ],
+        Seed::Cactus => vec![
+            (Harvest::Sugar, GameConsts::T_SUGAR_CACTUS),
+            (Harvest::Wood, GameConsts::T_WOOD_CACTUS),
+        ],
+        Seed::Wallbush => vec![(Harvest::PumpkinSeed, GameConsts::T_PUMKINSEED_WALLBUSH)],
+        Seed::Swapshroom { pair_id: _ } => {
+            if let Some(available_harvest_volume) = player.harvest.get_mut(&Harvest::CactusMeat) {
+                *available_harvest_volume -= GameConsts::T_CACTUSMEAT_SWAPSHROOM * volume;
+                for _ in 0..volume {
+                    // Uuid should not be generated by the Game's rng, it should be random random
+                    player.seeds.insert(
+                        Seed::Swapshroom {
+                            pair_id: Some(Uuid::new_v4()),
+                        },
+                        2,
+                    );
+                }
+                return msg_to_player_with_game_content(map, player, MsgToPlayer::Traded).await;
+            }
+            return msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughHarvest)
+                .await;
+        }
+        Seed::Sunflower => vec![
+            (Harvest::PumpkinSeed, GameConsts::T_PUMKINSEED_SUNFLOWER),
+            (Harvest::CactusMeat, GameConsts::T_CACTUSMEAT_SUNFLOWER),
+        ],
+    };
+    action_trade_helper(map, player, volume, seed, trade).await;
+}
+
+async fn action_trade_helper(
+    map: &mut Map,
+    player: &mut Player,
+    volume: u32,
+    seed: Seed,
+    trade: Vec<(Harvest, u32)>,
+) {
+    let mut ok = true;
+    for (harvest, cost) in trade.iter() {
+        match player.harvest.get(harvest) {
+            Some(available_harvest_volume) => {
+                if *available_harvest_volume < *cost * volume {
+                    ok = false;
+                }
+            }
+            None => ok = false,
+        }
+    }
+    if ok {
+        for (harvest, cost) in trade.iter() {
+            if let Some(available_harvest_volume) = player.harvest.get_mut(harvest) {
+                *available_harvest_volume -= *cost * volume;
+            }
+        }
+        match player.seeds.entry(seed.clone()) {
+            Entry::Occupied(occupied_entry) => {
+                *occupied_entry.into_mut() += volume;
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(1);
+            }
+        }
+        msg_to_player_with_game_content(map, player, MsgToPlayer::Traded).await;
+    } else {
+        msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughHarvest).await;
+    }
+}
+
+async fn action_till(map: &mut Map, player: &mut Player) {
+    let cell = map.get_cell(&player.pos).to_owned();
+    match cell.ground {
+        Ground::Dirt => map.set_cell(
+            &player.pos,
+            Cell {
+                ground: Ground::Tiled,
+                plant: Plant::None,
+            },
+        ),
+        Ground::Tiled => {
+            map.set_cell(
+                &player.pos,
+                Cell {
+                    ground: Ground::Dirt,
+                    plant: Plant::None,
+                },
+            );
+        }
+        _ => {
+            return msg_to_player_with_game_content(map, player, MsgToPlayer::WrongGroundType)
+                .await;
+        }
+    }
+    msg_to_player_with_game_content(map, player, MsgToPlayer::Tilled).await;
 }
 
 pub struct Player {

@@ -1,3 +1,4 @@
+mod dawing;
 mod game;
 mod handle_connection;
 mod map;

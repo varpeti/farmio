@@ -1,12 +1,12 @@
-{ "NewGame" : { "player_name" : "P1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 2, "turn_duration_ms" : 100000, "map_size" : 16, "seed": 123456789 } } }
+{ "NewGame" : { "player_name" : "P01", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 1, "turn_duration_ms" : 100000, "map_size" : 16, "seed": 123456789 } } }
 
-{ "JoinGame" : { "player_name" : "P1", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name": "Game1" } }
-
-
-{ "JoinGame" : { "player_name" : "P2", "player_uuid" : "ca91129c-09ca-40fd-8c8c-7f9a78ab2f8e", "game_name": "Game1" } }
+{ "JoinGame" : { "player_name" : "P01", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name": "Game1" } }
 
 
-{ "JoinGame" : { "player_name" : "P3", "player_uuid" : "dc0b855b-ae92-45fd-9da8-ede09175371e", "game_name": "Game1" } }
+{ "JoinGame" : { "player_name" : "P02", "player_uuid" : "ca91129c-09ca-40fd-8c8c-7f9a78ab2f8e", "game_name": "Game1" } }
+
+
+{ "JoinGame" : { "player_name" : "P03", "player_uuid" : "dc0b855b-ae92-45fd-9da8-ede09175371e", "game_name": "Game1" } }
 
 
 { "Move" : { "direction" : "Up" } }
@@ -14,3 +14,5 @@
 { "Move" : { "direction" : "Down" } }
 { "Move" : { "direction" : "Left" } }
 "Harvest"
+{ "Trade": { "seed": "Cane", "volume": 1 } }
+{ "Plant": { "seed": "Cane"} }

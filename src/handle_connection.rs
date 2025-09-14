@@ -63,7 +63,7 @@ pub async fn handle_connection(framed: Framed<TcpStream, LinesCodec>, games: Gam
                         "New Game by Player `{}`: `{}({:?})`",
                         &player_name, &game_name, &game_settings
                     );
-                    let mut game = Game::new(game_name.clone(), to_game_rx, game_settings);
+                    let mut game = Game::new(game_name.clone(), to_game_rx, game_settings).await;
                     games.insert(game_name.clone(), to_game_tx.clone());
                     tokio::spawn(async move { game.run().await });
                     send_msg_to_player(&mut to_player_tx, LobbyToPlayer::GameCreated).await;
