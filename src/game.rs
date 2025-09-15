@@ -42,7 +42,7 @@ pub enum Action {
 
 #[derive(Debug, Serialize)]
 pub enum MsgToPlayer {
-    // Admin
+    // Admin //
     Connected {
         game_settings: GameSettings,
         players_connected: u32,
@@ -52,29 +52,33 @@ pub enum MsgToPlayer {
     WaitingOtherPlayersToJoin,
     GameIsFull,
     GameStarted,
-    // Idle
+    // Idle //
     Idled,
-    // Move
+    // Move //
     Moved,
     BlockedBy(BlockedBy),
-    // Harvest
+    // Harvest //
     Harvested {
         harvest: Harvest,
         volume: u32,
     },
     NoHarvest,
-    // Plant
+    // Plant //
     Planted,
     NotEnoughSeed,
     WrongGroundType,
     InvalidSwapshroomUuid,
-    // Trade
+    // Trade //
     Traded,
     NotEnoughHarvest,
     InvalidTrade,
-    // Till
+    // Till //
     Tilled,
     //WrongGroundType,
+    // Forced Move //
+    Swapped, // When a palyer receive it they should read again the TCP buffer,
+             // because it was sent in the previous round as an extra message,
+             // (in case of single thread player)
 }
 
 #[derive(Debug, Serialize)]
@@ -88,7 +92,7 @@ pub struct MsgToPlayerWithGameContent {
     cell: Cell,
     harvest: HashMap<Harvest, u32>,
     seed: HashMap<Seed, u32>,
-    score: u32,
+    points: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,7 @@ pub struct Game {
     players: HashMap<Uuid, Player>,
     map: Map,
     drawer: Drawer,
+    active_swapshrooms: HashMap<u32, (Pos, Pos)>,
 }
 
 impl Game {
@@ -123,6 +128,7 @@ impl Game {
         let map = Map::generate_map(game_settings.map_size as usize, &mut rng);
         map.print_map_with_players(&mut drawer, &HashMap::new())
             .await;
+        let swapshrooms = HashMap::new();
         Self {
             game_name,
             to_game_rx,
@@ -132,6 +138,7 @@ impl Game {
             players,
             map,
             drawer,
+            active_swapshrooms: swapshrooms,
         }
     }
 
@@ -229,14 +236,11 @@ impl Game {
     }
 
     async fn game_loop(&mut self) {
-        // TODO: clean up this enourmous function, break it into smaller ones
         let turn_duration = Duration::from_millis(self.game_settings.turn_duration_ms as u64);
         loop {
             let player_actions = self.collect_player_actions(turn_duration).await;
             self.process_player_actions(player_actions).await;
-            self.map.update_map();
-            // TODO: use log instead of prints, or separate the prints form drawing
-            println!("{}", self.p());
+            self.map.update_map(&mut self.active_swapshrooms);
             self.map
                 .print_map_with_players(
                     &mut self.drawer,
@@ -249,6 +253,7 @@ impl Game {
                 .await;
             self.turns += 1;
         }
+        // TODO: End the game if a player reaches a certain score
     }
 
     async fn collect_player_actions(&mut self, turn_duration: Duration) -> HashMap<Uuid, Action> {
@@ -294,6 +299,7 @@ impl Game {
         let p = self.p();
         let mut next_positions = HashMap::<Pos, Vec<Uuid>>::new();
         let mut moving_players = Vec::<Uuid>::new();
+        let mut swap_players = Vec::<(Pos, Pos)>::new();
 
         for (player_uuid, action) in player_actions {
             let player = match self.players.get_mut(&player_uuid) {
@@ -317,12 +323,28 @@ impl Game {
                         &mut next_positions,
                     );
                 }
-                Action::Harvest => action_harvest(&mut self.map, player).await,
+                Action::Harvest => {
+                    action_harvest(
+                        &mut self.map,
+                        player,
+                        &mut self.active_swapshrooms,
+                        &mut swap_players,
+                    )
+                    .await
+                }
                 Action::Plant { seed } => {
                     action_plant(&mut self.map, player, seed, &mut self.rng).await
                 }
                 Action::Trade { seed, volume } => {
-                    action_trade(&mut self.map, player, seed, volume).await
+                    action_trade(
+                        &mut self.map,
+                        player,
+                        seed,
+                        volume,
+                        &mut self.rng,
+                        &self.active_swapshrooms,
+                    )
+                    .await
                 }
                 Action::Till => action_till(&mut self.map, player).await,
                 Action::__Connect__ {
@@ -331,7 +353,14 @@ impl Game {
                 } => unreachable!(),
             }
         }
-        action_move_execution(&self.map, &mut self.players, next_positions, moving_players).await;
+        action_move_execution(
+            &self.map,
+            &mut self.players,
+            next_positions,
+            moving_players,
+            swap_players,
+        )
+        .await;
     }
 }
 
@@ -358,6 +387,7 @@ async fn action_move_execution(
     players: &mut HashMap<Uuid, Player>,
     mut next_positions: HashMap<Pos, Vec<Uuid>>,
     moving_players: Vec<Uuid>,
+    swap_players: Vec<(Pos, Pos)>,
 ) {
     for (player_uuid, player) in players.iter_mut() {
         if !moving_players.contains(player_uuid) {
@@ -393,16 +423,37 @@ async fn action_move_execution(
             }
         }
     }
+
+    for (_, player) in players.iter_mut() {
+        for (p1, p2) in swap_players.iter() {
+            if player.pos == *p1 {
+                player.pos = p2.clone();
+                send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Swapped).await;
+            } else if player.pos == *p2 {
+                player.pos = p1.clone();
+                send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Swapped).await;
+            }
+        }
+    }
 }
 
-async fn action_harvest(map: &mut Map, player: &mut Player) {
+async fn action_harvest(
+    map: &mut Map,
+    player: &mut Player,
+    active_swapshrooms: &mut HashMap<u32, (Pos, Pos)>,
+    swap_players: &mut Vec<(Pos, Pos)>,
+) {
     let mut cell = map.get_cell(&player.pos).clone();
     let msg_to_player = match cell.plant {
         Plant::None => MsgToPlayer::NoHarvest,
         Plant::Wheat { growth } => {
             if growth == GameConsts::G_WHEAT_GRAINS {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::Grains, GameConsts::V_WHEAT_GRAINS)
+                player.harvest(
+                    Harvest::Grains,
+                    GameConsts::V_WHEAT_GRAINS,
+                    GameConsts::P_WHEAT_GRAINS,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -414,10 +465,14 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
                     growth: GameConsts::G_BUSH_WOOD,
                     berries: 0,
                 };
-                player.harvest(Harvest::Berry, berries as u32)
+                player.harvest(Harvest::Berry, berries as u32, GameConsts::P_BUSH_BERRIES)
             } else if growth >= GameConsts::G_BUSH_WOOD {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::Wood, GameConsts::V_BUSH_WOOD)
+                player.harvest(
+                    Harvest::Wood,
+                    GameConsts::V_BUSH_WOOD,
+                    GameConsts::P_BUSH_WOOD,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -426,7 +481,11 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
         Plant::Tree { growth } => {
             if growth == GameConsts::G_TREE_WOOD {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::Wood, GameConsts::V_TREE_WOOD)
+                player.harvest(
+                    Harvest::Wood,
+                    GameConsts::V_TREE_WOOD,
+                    GameConsts::P_TREE_WOOD,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -435,7 +494,11 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
         Plant::Cane { growth } => {
             if growth == GameConsts::G_CANE_SUGAR {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::Sugar, GameConsts::V_CANE_SUGAR)
+                player.harvest(
+                    Harvest::Sugar,
+                    GameConsts::V_CANE_SUGAR,
+                    GameConsts::P_CANE_SUGAR,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -448,7 +511,11 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
         } => {
             if growth >= GameConsts::G_PUMPKIN_PUMPKINSEED {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::PumpkinSeed, (curent_size * curent_size) as u32)
+                player.harvest(
+                    Harvest::PumpkinSeed,
+                    (curent_size * curent_size) as u32,
+                    GameConsts::P_PUMPKIN_PUMPKINSEED,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -457,7 +524,11 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
         Plant::Cactus { growth, size } => {
             if growth >= GameConsts::G_CACTUS_CACTUSMEAT {
                 cell.plant = Plant::None;
-                player.harvest(Harvest::CactusMeat, size as u32)
+                player.harvest(
+                    Harvest::CactusMeat,
+                    size as u32,
+                    GameConsts::P_CACTUS_CACTUSMEAT,
+                )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
@@ -468,9 +539,29 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
             health: _,
         } => MsgToPlayer::NoHarvest,
 
-        Plant::Swapshroom { pair_id, active } => {
+        Plant::Swapshroom {
+            growth: _,
+            pair_id,
+            active,
+        } => {
             if active {
-                todo!();
+                match active_swapshrooms.entry(pair_id) {
+                    Entry::Occupied(occupied_entry) => {
+                        let (p1, p2) = occupied_entry.remove();
+                        let mut c1 = map.get_cell(&p1).clone();
+                        c1.plant = Plant::None;
+                        let mut c2 = map.get_cell(&p2).clone();
+                        c2.plant = Plant::None;
+                        map.set_cell(&p1, c2);
+                        map.set_cell(&p2, c1);
+                        swap_players.push((p1, p2));
+                        MsgToPlayer::Swapped
+                    }
+                    Entry::Vacant(_vacant_entry) => {
+                        eprintln!("Active Swapshroom but not in active_swapshrooms?");
+                        MsgToPlayer::NoHarvest
+                    }
+                }
             } else {
                 // It remains
                 MsgToPlayer::NoHarvest
@@ -478,7 +569,21 @@ async fn action_harvest(map: &mut Map, player: &mut Player) {
         }
         Plant::Sunflower { growth, rank } => {
             if growth == GameConsts::G_SUNFLOWER_POWER {
-                todo!()
+                let max_rank = map.get_highest_sunflower_rank();
+                if rank == max_rank {
+                    cell.plant = Plant::None;
+                    player.harvest(
+                        Harvest::Power,
+                        GameConsts::G_SUNFLOWER_POWER as u32,
+                        GameConsts::P_SUNFLOWER_POWER,
+                    )
+                } else {
+                    player.points = player.points.saturating_sub(
+                        GameConsts::P_SUNFLOWER_POWER * (GameConsts::V_SUNFLOWER_POWER as u32),
+                    );
+                    cell.plant = Plant::None;
+                    MsgToPlayer::NoHarvest
+                }
             } else {
                 // It remains
                 MsgToPlayer::NoHarvest
@@ -518,6 +623,7 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
             (Seed::Swapshroom { pair_id }, _) => {
                 if let Some(pair_id) = pair_id {
                     Plant::Swapshroom {
+                        growth: 0,
                         pair_id,
                         active: false,
                     }
@@ -557,7 +663,14 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
     msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughSeed).await;
 }
 
-async fn action_trade(map: &mut Map, player: &mut Player, seed: Seed, volume: u32) {
+async fn action_trade(
+    map: &mut Map,
+    player: &mut Player,
+    seed: Seed,
+    volume: u32,
+    rng: &mut SmallRng,
+    active_swapshrooms: &HashMap<u32, (Pos, Pos)>,
+) {
     if volume == 0 {
         return msg_to_player_with_game_content(map, player, MsgToPlayer::InvalidTrade).await;
     }
@@ -581,11 +694,19 @@ async fn action_trade(map: &mut Map, player: &mut Player, seed: Seed, volume: u3
         Seed::Swapshroom { pair_id: _ } => {
             if let Some(available_harvest_volume) = player.harvest.get_mut(&Harvest::CactusMeat) {
                 *available_harvest_volume -= GameConsts::T_CACTUSMEAT_SWAPSHROOM * volume;
+                // For each volume we gave two seed with matching pair_id
                 for _ in 0..volume {
-                    // Uuid should not be generated by the Game's rng, it should be random random
+                    // pair_id is unique
+                    let mut pair_id: u32;
+                    loop {
+                        pair_id = rng.random();
+                        if !active_swapshrooms.contains_key(&pair_id) {
+                            break;
+                        }
+                    }
                     player.seeds.insert(
                         Seed::Swapshroom {
-                            pair_id: Some(Uuid::new_v4()),
+                            pair_id: Some(pair_id),
                         },
                         2,
                     );
@@ -674,7 +795,7 @@ pub struct Player {
     pub pos: Pos,
     pub harvest: HashMap<Harvest, u32>,
     pub seeds: HashMap<Seed, u32>,
-    pub score: u32,
+    pub points: u32,
 }
 
 impl Player {
@@ -706,11 +827,11 @@ impl Player {
             pos: Pos { x, y },
             harvest: HashMap::new(),
             seeds: HashMap::new(),
-            score: 0,
+            points: 0,
         }
     }
 
-    fn harvest(&mut self, harvest: Harvest, volume: u32) -> MsgToPlayer {
+    fn harvest(&mut self, harvest: Harvest, volume: u32, points: u32) -> MsgToPlayer {
         match self.harvest.entry(harvest.clone()) {
             Entry::Occupied(occupied_entry) => {
                 *occupied_entry.into_mut() += volume;
@@ -719,6 +840,7 @@ impl Player {
                 vacant_entry.insert(volume);
             }
         }
+        self.points += points * volume;
         MsgToPlayer::Harvested { harvest, volume }
     }
 }
@@ -729,7 +851,7 @@ async fn msg_to_player_with_game_content(map: &Map, player: &mut Player, result:
         cell: map.get_cell(&player.pos).to_owned(),
         harvest: player.harvest.clone(),
         seed: player.seeds.clone(),
-        score: player.score,
+        points: player.points,
     };
     send_msg_to_player(&mut player.to_player_tx, msg).await;
 }
