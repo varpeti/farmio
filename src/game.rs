@@ -11,9 +11,16 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    cell::Cell,
     dawing::Drawer,
+    direction::Direction,
+    ground::Ground,
     handle_connection::PlayerAction,
-    map::{Cell, Direction, GameConsts, Ground, Harvest, Map, Plant, Pos, Seed},
+    harvest::Harvest,
+    map::Map,
+    plant::{Bush, Cactus, Cane, Plant, Pumpkin, Sunflower, Swapshroom, Tree, Wallbush, Wheat},
+    pos::Pos,
+    seed::Seed,
     send_to_player::send_msg_to_player,
 };
 
@@ -84,14 +91,16 @@ pub enum MsgToPlayer {
 #[derive(Debug, Serialize)]
 pub enum BlockedBy {
     AnotherPlayer,
+    WallBush,   // TODO:
+    Swapshroom, // TODO
 }
 
 #[derive(Debug, Serialize)]
 pub struct MsgToPlayerWithGameContent {
     result: MsgToPlayer,
     cell: Cell,
-    harvest: HashMap<Harvest, u32>,
-    seed: HashMap<Seed, u32>,
+    harvests: HashMap<Harvest, u32>,
+    seeds: HashMap<Seed, u32>,
     points: u32,
 }
 
@@ -444,108 +453,89 @@ async fn action_harvest(
     swap_players: &mut Vec<(Pos, Pos)>,
 ) {
     let mut cell = map.get_cell(&player.pos).clone();
-    let msg_to_player = match cell.plant {
+    let msg_to_player = match cell.plant.clone() {
         Plant::None => MsgToPlayer::NoHarvest,
-        Plant::Wheat { growth } => {
-            if growth == GameConsts::G_WHEAT_GRAINS {
+        Plant::Wheat(wheat) => {
+            if wheat.growth == Wheat::GROWTH_TO_GRAINS {
                 cell.plant = Plant::None;
                 player.harvest(
                     Harvest::Grains,
-                    GameConsts::V_WHEAT_GRAINS,
-                    GameConsts::P_WHEAT_GRAINS,
+                    Wheat::GRAINS_YIELD as u32,
+                    Wheat::POINTS_PER_GRAINS as u32,
                 )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Bush { growth, berries } => {
-            if berries > 0 {
-                cell.plant = Plant::Bush {
-                    growth: GameConsts::G_BUSH_WOOD,
+        Plant::Bush(bush) => {
+            if bush.berries > 0 {
+                cell.plant = Plant::Bush(Bush {
+                    growth: Bush::GROWTH_TO_WOOD,
                     berries: 0,
-                };
-                player.harvest(Harvest::Berry, berries as u32, GameConsts::P_BUSH_BERRIES)
-            } else if growth >= GameConsts::G_BUSH_WOOD {
-                cell.plant = Plant::None;
+                });
                 player.harvest(
-                    Harvest::Wood,
-                    GameConsts::V_BUSH_WOOD,
-                    GameConsts::P_BUSH_WOOD,
+                    Harvest::Berry,
+                    bush.berries as u32,
+                    Bush::POINTS_PER_BERRIES,
                 )
+            } else if bush.growth >= Bush::GROWTH_TO_WOOD {
+                cell.plant = Plant::None;
+                player.harvest(Harvest::Wood, Bush::WOOD_YIELD, Bush::POINTS_PER_WOOD)
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Tree { growth } => {
-            if growth == GameConsts::G_TREE_WOOD {
+        Plant::Tree(tree) => {
+            if tree.growth == Tree::GROWTH_TO_WOOD {
                 cell.plant = Plant::None;
-                player.harvest(
-                    Harvest::Wood,
-                    GameConsts::V_TREE_WOOD,
-                    GameConsts::P_TREE_WOOD,
-                )
+                player.harvest(Harvest::Wood, Tree::WOOD_YIELD, Tree::POINTS_PER_WOOD)
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Cane { growth } => {
-            if growth == GameConsts::G_CANE_SUGAR {
+        Plant::Cane(cane) => {
+            if cane.growth == Cane::GROWTH_TO_SUGAR {
                 cell.plant = Plant::None;
-                player.harvest(
-                    Harvest::Sugar,
-                    GameConsts::V_CANE_SUGAR,
-                    GameConsts::P_CANE_SUGAR,
-                )
+                player.harvest(Harvest::Sugar, Cane::SUGAR_YIELD, Cane::POINTS_PER_SUGAR)
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Pumpkin {
-            growth,
-            curent_size,
-            max_size: _,
-        } => {
-            if growth >= GameConsts::G_PUMPKIN_PUMPKINSEED {
+        Plant::Pumpkin(pumpkin) => {
+            if pumpkin.growth >= Pumpkin::GROWTH_TO_PUMPKINSEED {
                 cell.plant = Plant::None;
                 player.harvest(
                     Harvest::PumpkinSeed,
-                    (curent_size * curent_size) as u32,
-                    GameConsts::P_PUMPKIN_PUMPKINSEED,
+                    pumpkin.pumpkinseed_yield(),
+                    Pumpkin::POINTS_PER_PUMPKINSEED,
                 )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Cactus { growth, size } => {
-            if growth >= GameConsts::G_CACTUS_CACTUSMEAT {
+        Plant::Cactus(cactus) => {
+            if cactus.growth >= Cactus::GROWTH_PER_CACTUSMEAT {
                 cell.plant = Plant::None;
                 player.harvest(
                     Harvest::CactusMeat,
-                    size as u32,
-                    GameConsts::P_CACTUS_CACTUSMEAT,
+                    cactus.size as u32,
+                    Cactus::POINTS_PER_CACTUSMEAT,
                 )
             } else {
                 cell.plant = Plant::None;
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Wallbush {
-            growth: _,
-            health: _,
-        } => MsgToPlayer::NoHarvest,
+        Plant::Wallbush(_) => MsgToPlayer::NoHarvest,
 
-        Plant::Swapshroom {
-            growth: _,
-            pair_id,
-            active,
-        } => {
-            if active {
-                match active_swapshrooms.entry(pair_id) {
+        Plant::Swapshroom(swapshroom) => {
+            if swapshroom.active {
+                match active_swapshrooms.entry(swapshroom.pair_id) {
                     Entry::Occupied(occupied_entry) => {
                         let (p1, p2) = occupied_entry.remove();
                         let mut c1 = map.get_cell(&p1).clone();
@@ -567,21 +557,21 @@ async fn action_harvest(
                 MsgToPlayer::NoHarvest
             }
         }
-        Plant::Sunflower { growth, rank } => {
-            if growth == GameConsts::G_SUNFLOWER_POWER {
+        Plant::Sunflower(sunflower) => {
+            if sunflower.growth == Sunflower::GROWTH_TO_POWER {
                 let max_rank = map.get_highest_sunflower_rank();
-                if rank == max_rank {
+                if sunflower.rank == max_rank {
                     cell.plant = Plant::None;
                     player.harvest(
                         Harvest::Power,
-                        GameConsts::G_SUNFLOWER_POWER as u32,
-                        GameConsts::P_SUNFLOWER_POWER,
+                        Sunflower::POWER_YIELD as u32,
+                        Sunflower::POINTS_PER_POWER,
                     )
                 } else {
-                    player.points = player.points.saturating_sub(
-                        GameConsts::P_SUNFLOWER_POWER * (GameConsts::V_SUNFLOWER_POWER as u32),
-                    );
                     cell.plant = Plant::None;
+                    player.points = player.points.saturating_sub(
+                        Sunflower::POINTS_PER_POWER * (Sunflower::POWER_YIELD as u32),
+                    );
                     MsgToPlayer::NoHarvest
                 }
             } else {
@@ -603,30 +593,30 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
         *volume -= 1;
         let mut cell = map.get_cell(&player.pos).to_owned();
         let plant = match (seed, cell.clone().ground) {
-            (Seed::Wheat, Ground::Dirt | Ground::Tiled) => Plant::Wheat { growth: 0 },
-            (Seed::Bush, Ground::Tiled) => Plant::Bush {
+            (Seed::Wheat, Ground::Dirt | Ground::Tiled) => Plant::Wheat(Wheat { growth: 0 }),
+            (Seed::Bush, Ground::Tiled) => Plant::Bush(Bush {
                 growth: 0,
                 berries: 0,
-            },
-            (Seed::Tree, Ground::Dirt) => Plant::Tree { growth: 0 },
-            (Seed::Cane, Ground::Sand) => Plant::Cane { growth: 0 },
-            (Seed::Pupkin, Ground::Tiled) => Plant::Pumpkin {
+            }),
+            (Seed::Tree, Ground::Dirt) => Plant::Tree(Tree { growth: 0 }),
+            (Seed::Cane, Ground::Sand) => Plant::Cane(Cane { growth: 0 }),
+            (Seed::Pupkin, Ground::Tiled) => Plant::Pumpkin(Pumpkin {
                 growth: 0,
-                curent_size: 1,
+                current_size: 1,
                 max_size: 1,
-            },
-            (Seed::Cactus, Ground::Sand) => Plant::Cactus { growth: 0, size: 0 },
-            (Seed::Wallbush, Ground::Tiled) => Plant::Wallbush {
+            }),
+            (Seed::Cactus, Ground::Sand) => Plant::Cactus(Cactus { growth: 0, size: 0 }),
+            (Seed::Wallbush, Ground::Tiled) => Plant::Wallbush(Wallbush {
                 growth: 0,
-                health: GameConsts::MAX_WALLBUSH_HEALTH,
-            },
+                health: Wallbush::MAX_HEALTH,
+            }),
             (Seed::Swapshroom { pair_id }, _) => {
                 if let Some(pair_id) = pair_id {
-                    Plant::Swapshroom {
+                    Plant::Swapshroom(Swapshroom {
                         growth: 0,
                         pair_id,
                         active: false,
-                    }
+                    })
                 } else {
                     return msg_to_player_with_game_content(
                         map,
@@ -643,10 +633,10 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
                     // Overwriting the existing ones, maybe skip if already has Sunflower?
                     // By overwriteing a player gets "Notified" by inspecting the rank again
                     // By not overwriteing a player can cause another player to fail (if lucky)
-                    cell.plant = Plant::Sunflower {
+                    cell.plant = Plant::Sunflower(Sunflower {
                         growth: 0,
                         rank: rng.random_range(u8::MIN..u8::MAX),
-                    };
+                    });
                     map.set_cell(&pos, cell);
                 }
                 return msg_to_player_with_game_content(map, player, MsgToPlayer::Planted).await;
@@ -679,21 +669,21 @@ async fn action_trade(
         Seed::Wheat => {
             return msg_to_player_with_game_content(map, player, MsgToPlayer::InvalidTrade).await
         }
-        Seed::Bush => vec![(Harvest::Grains, GameConsts::T_GRAINS_BUSH)],
-        Seed::Tree => vec![(Harvest::Wood, GameConsts::T_WOOD_TREE)],
-        Seed::Cane => vec![(Harvest::Grains, GameConsts::T_GRAINS_CANE)],
+        Seed::Bush => vec![(Harvest::Grains, Seed::TRADE_GRAINS_FOR_BUSH)],
+        Seed::Tree => vec![(Harvest::Wood, Seed::TRADE_WOOD_FOR_TREE)],
+        Seed::Cane => vec![(Harvest::Grains, Seed::TRADE_GRAINS_FOR_CANE)],
         Seed::Pupkin => vec![
-            (Harvest::Berry, GameConsts::T_BERRIES_PUMPKIN),
-            (Harvest::Wood, GameConsts::T_WOOD_PUMPKIN),
+            (Harvest::Berry, Seed::TRADE_BERRIES_FOR_PUMPKIN),
+            (Harvest::Wood, Seed::TRADE_WOOD_FOR_PUMPKIN),
         ],
         Seed::Cactus => vec![
-            (Harvest::Sugar, GameConsts::T_SUGAR_CACTUS),
-            (Harvest::Wood, GameConsts::T_WOOD_CACTUS),
+            (Harvest::Sugar, Seed::TRADE_SUGAR_FOR_CACTUS),
+            (Harvest::Wood, Seed::TRADE_WOOD_FOR_CACTUS),
         ],
-        Seed::Wallbush => vec![(Harvest::PumpkinSeed, GameConsts::T_PUMKINSEED_WALLBUSH)],
+        Seed::Wallbush => vec![(Harvest::PumpkinSeed, Seed::TRADE_PUMKINSEED_FOR_WALLBUSH)],
         Seed::Swapshroom { pair_id: _ } => {
-            if let Some(available_harvest_volume) = player.harvest.get_mut(&Harvest::CactusMeat) {
-                *available_harvest_volume -= GameConsts::T_CACTUSMEAT_SWAPSHROOM * volume;
+            if let Some(available_harvest_volume) = player.harvests.get_mut(&Harvest::CactusMeat) {
+                *available_harvest_volume -= Seed::TRADE_CACTUSMEAT_FOR_SWAPSHROOM * volume;
                 // For each volume we gave two seed with matching pair_id
                 for _ in 0..volume {
                     // pair_id is unique
@@ -717,8 +707,8 @@ async fn action_trade(
                 .await;
         }
         Seed::Sunflower => vec![
-            (Harvest::PumpkinSeed, GameConsts::T_PUMKINSEED_SUNFLOWER),
-            (Harvest::CactusMeat, GameConsts::T_CACTUSMEAT_SUNFLOWER),
+            (Harvest::PumpkinSeed, Seed::TRADE_PUMKINSEED_FOR_SUNFLOWER),
+            (Harvest::CactusMeat, Seed::TRADE_CACTUSMEAT_FOR_SUNFLOWER),
         ],
     };
     action_trade_helper(map, player, volume, seed, trade).await;
@@ -733,7 +723,7 @@ async fn action_trade_helper(
 ) {
     let mut ok = true;
     for (harvest, cost) in trade.iter() {
-        match player.harvest.get(harvest) {
+        match player.harvests.get(harvest) {
             Some(available_harvest_volume) => {
                 if *available_harvest_volume < *cost * volume {
                     ok = false;
@@ -744,7 +734,7 @@ async fn action_trade_helper(
     }
     if ok {
         for (harvest, cost) in trade.iter() {
-            if let Some(available_harvest_volume) = player.harvest.get_mut(harvest) {
+            if let Some(available_harvest_volume) = player.harvests.get_mut(harvest) {
                 *available_harvest_volume -= *cost * volume;
             }
         }
@@ -793,7 +783,7 @@ pub struct Player {
     pub player_name: String,
     pub to_player_tx: Sender<String>,
     pub pos: Pos,
-    pub harvest: HashMap<Harvest, u32>,
+    pub harvests: HashMap<Harvest, u32>,
     pub seeds: HashMap<Seed, u32>,
     pub points: u32,
 }
@@ -825,14 +815,14 @@ impl Player {
             player_name,
             to_player_tx,
             pos: Pos { x, y },
-            harvest: HashMap::new(),
+            harvests: HashMap::new(),
             seeds: HashMap::new(),
             points: 0,
         }
     }
 
     fn harvest(&mut self, harvest: Harvest, volume: u32, points: u32) -> MsgToPlayer {
-        match self.harvest.entry(harvest.clone()) {
+        match self.harvests.entry(harvest.clone()) {
             Entry::Occupied(occupied_entry) => {
                 *occupied_entry.into_mut() += volume;
             }
@@ -849,8 +839,8 @@ async fn msg_to_player_with_game_content(map: &Map, player: &mut Player, result:
     let msg = MsgToPlayerWithGameContent {
         result,
         cell: map.get_cell(&player.pos).to_owned(),
-        harvest: player.harvest.clone(),
-        seed: player.seeds.clone(),
+        harvests: player.harvests.clone(),
+        seeds: player.seeds.clone(),
         points: player.points,
     };
     send_msg_to_player(&mut player.to_player_tx, msg).await;

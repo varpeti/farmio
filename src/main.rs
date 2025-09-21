@@ -1,7 +1,14 @@
+mod cell;
 mod dawing;
+mod direction;
 mod game;
+mod ground;
 mod handle_connection;
+mod harvest;
 mod map;
+mod plant;
+mod pos;
+mod seed;
 mod send_to_player;
 mod server;
 

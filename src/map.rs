@@ -4,76 +4,15 @@ use std::{
 };
 
 use rand::{rngs::SmallRng, seq::SliceRandom};
-use serde::{Deserialize, Serialize};
 
-use crate::dawing::Drawer;
-
-pub struct GameConsts;
-
-impl GameConsts {
-    // (G)rowth, (V)olume, (P)oints
-    pub const G_WHEAT_GRAINS: u8 = 8;
-    pub const V_WHEAT_GRAINS: u32 = 1;
-    pub const P_WHEAT_GRAINS: u32 = 1;
-
-    pub const G_BUSH_WOOD: u8 = 10;
-    pub const V_BUSH_WOOD: u32 = 1;
-    pub const P_BUSH_WOOD: u32 = 1;
-
-    pub const G_BUSH_BERRIES: u8 = 4;
-    pub const P_BUSH_BERRIES: u32 = 2;
-    pub const MAX_BUSH_BERRIES: u8 = 4;
-
-    pub const G_TREE_WOOD: u8 = 16;
-    pub const V_TREE_WOOD: u32 = 16;
-    pub const P_TREE_WOOD: u32 = 1;
-
-    pub const G_CANE_SUGAR: u8 = 10;
-    pub const V_CANE_SUGAR: u32 = 3;
-    pub const P_CANE_SUGAR: u32 = 2;
-
-    pub const G_PUMPKIN_PUMPKINSEED: u8 = 4;
-    pub const P_PUMPKIN_PUMPKINSEED: u32 = 5;
-
-    pub const G_CACTUS_CACTUSMEAT: u8 = 6;
-    pub const P_CACTUS_CACTUSMEAT: u32 = 10;
-    pub const MAX_CACTUS_CACTUSMEAT: u8 = 3;
-
-    pub const G_WALLBUSH: u8 = 8;
-    pub const MAX_WALLBUSH_HEALTH: u8 = 42;
-
-    pub const G_SWAPSHROOM: u8 = 8;
-
-    pub const G_SUNFLOWER_POWER: u8 = 30;
-    pub const V_SUNFLOWER_POWER: u8 = 1;
-    pub const P_SUNFLOWER_POWER: u32 = 1024;
-
-    // Ground Type Percentages
-    const GTP_TILLED_BUSH: u8 = 5;
-    const GTP_SAND_EMPTY: u8 = 20;
-    const GTP_SAND_CANE: u8 = 5;
-    const GTP_WATER: u8 = 10;
-    // const GTP_STONE // Game has Stone where Players spawn
-    // const P_DIRT_WHEAT // Rest is Dirt with Wheat
-
-    // Trade Costs
-    pub const T_GRAINS_BUSH: u32 = 4;
-    pub const T_GRAINS_CANE: u32 = 2;
-
-    pub const T_WOOD_TREE: u32 = 4;
-
-    pub const T_WOOD_PUMPKIN: u32 = 16;
-    pub const T_BERRIES_PUMPKIN: u32 = 8;
-
-    pub const T_WOOD_CACTUS: u32 = 16;
-    pub const T_SUGAR_CACTUS: u32 = 9;
-
-    pub const T_PUMKINSEED_WALLBUSH: u32 = 10;
-    pub const T_CACTUSMEAT_SWAPSHROOM: u32 = 9;
-
-    pub const T_PUMKINSEED_SUNFLOWER: u32 = 50;
-    pub const T_CACTUSMEAT_SUNFLOWER: u32 = 27;
-}
+use crate::{
+    cell::Cell,
+    dawing::Drawer,
+    direction::Direction,
+    ground::Ground,
+    plant::{Bush, Cactus, Cane, Plant, Pumpkin, Sunflower, Swapshroom, Tree, Wallbush, Wheat},
+    pos::Pos,
+};
 
 #[derive(Clone)]
 pub struct Map {
@@ -81,12 +20,17 @@ pub struct Map {
 }
 
 impl Map {
+    const GTP_TILLED_BUSH: u8 = 5;
+    const GTP_SAND_EMPTY: u8 = 20;
+    const GTP_SAND_CANE: u8 = 5;
+    const GTP_WATER: u8 = 10;
+
     pub fn generate_map(map_size: usize, rng: &mut SmallRng) -> Map {
         let a = map_size * map_size;
-        let tilled_bush: usize = (a * GameConsts::GTP_TILLED_BUSH as usize) / 100;
-        let sand_empty: usize = (a * GameConsts::GTP_SAND_EMPTY as usize) / 100 + tilled_bush;
-        let sand_cane: usize = (a * GameConsts::GTP_SAND_CANE as usize) / 100 + sand_empty;
-        let water: usize = (a * GameConsts::GTP_WATER as usize) / 100 + sand_cane;
+        let tilled_bush: usize = (a * Map::GTP_TILLED_BUSH as usize) / 100;
+        let sand_empty: usize = (a * Map::GTP_SAND_EMPTY as usize) / 100 + tilled_bush;
+        let sand_cane: usize = (a * Map::GTP_SAND_CANE as usize) / 100 + sand_empty;
+        let water: usize = (a * Map::GTP_WATER as usize) / 100 + sand_cane;
         let pumpkin: usize = 1 + water;
         let cactus: usize = 1 + pumpkin;
 
@@ -95,11 +39,10 @@ impl Map {
             let cell = if tilled_bush > i {
                 Cell {
                     ground: Ground::Tiled,
-                    plant: Plant::Bush {
-                        growth: GameConsts::G_BUSH_WOOD
-                            + GameConsts::G_BUSH_BERRIES * GameConsts::MAX_BUSH_BERRIES,
-                        berries: GameConsts::MAX_BUSH_BERRIES,
-                    },
+                    plant: Plant::Bush(Bush {
+                        growth: Bush::GROWTH_TO_WOOD + Bush::GROWTH_PER_BERRIES * Bush::MAX_BERRIES,
+                        berries: Bush::MAX_BERRIES,
+                    }),
                 }
             } else if sand_empty > i {
                 Cell {
@@ -109,9 +52,9 @@ impl Map {
             } else if sand_cane > i {
                 Cell {
                     ground: Ground::Sand,
-                    plant: Plant::Cane {
-                        growth: GameConsts::G_CANE_SUGAR,
-                    },
+                    plant: Plant::Cane(Cane {
+                        growth: Cane::GROWTH_TO_SUGAR,
+                    }),
                 }
             } else if water > i {
                 Cell {
@@ -121,26 +64,26 @@ impl Map {
             } else if pumpkin > i {
                 Cell {
                     ground: Ground::Tiled,
-                    plant: Plant::Pumpkin {
-                        growth: GameConsts::G_PUMPKIN_PUMPKINSEED,
-                        curent_size: 1,
+                    plant: Plant::Pumpkin(Pumpkin {
+                        growth: Pumpkin::GROWTH_TO_PUMPKINSEED,
+                        current_size: 1,
                         max_size: 1,
-                    },
+                    }),
                 }
             } else if cactus > i {
                 Cell {
                     ground: Ground::Sand,
-                    plant: Plant::Cactus {
-                        growth: GameConsts::G_CACTUS_CACTUSMEAT * GameConsts::MAX_CACTUS_CACTUSMEAT,
-                        size: GameConsts::MAX_CACTUS_CACTUSMEAT,
-                    },
+                    plant: Plant::Cactus(Cactus {
+                        growth: Cactus::GROWTH_PER_CACTUSMEAT * Cactus::MAX_CACTUSMEAT,
+                        size: Cactus::MAX_CACTUSMEAT,
+                    }),
                 }
             } else {
                 Cell {
                     ground: Ground::Dirt,
-                    plant: Plant::Wheat {
-                        growth: GameConsts::G_WHEAT_GRAINS,
-                    },
+                    plant: Plant::Wheat(Wheat {
+                        growth: Wheat::GROWTH_TO_GRAINS,
+                    }),
                 }
             };
             flat_map.push(cell);
@@ -206,7 +149,7 @@ impl Map {
         let mut max_rank = 0;
         for line in self.map.iter() {
             for cell in line.iter() {
-                if let Plant::Sunflower { growth: _, rank } = cell.plant {
+                if let Plant::Sunflower(Sunflower { growth: _, rank }) = cell.plant {
                     max_rank = max_rank.max(rank);
                 }
             }
@@ -252,96 +195,84 @@ impl Map {
                 match &mut cell.plant {
                     Plant::None => {
                         if let Ground::Dirt = cell.ground {
-                            cell.plant = Plant::Wheat { growth: 0 };
+                            cell.plant = Plant::Wheat(Wheat { growth: 0 });
                         }
                     }
-                    Plant::Wheat { growth } => {
-                        if *growth < GameConsts::G_WHEAT_GRAINS {
-                            *growth += growt_rate;
+                    Plant::Wheat(wheat) => {
+                        if wheat.growth < Wheat::GROWTH_TO_GRAINS {
+                            wheat.growth += growt_rate;
                         }
                     }
-                    Plant::Bush { growth, berries } => {
-                        if *growth < GameConsts::G_BUSH_WOOD {
-                            *growth += growt_rate;
-                        } else if *growth
-                            < GameConsts::G_BUSH_WOOD
-                                + GameConsts::MAX_BUSH_BERRIES * GameConsts::G_BUSH_BERRIES
+                    Plant::Bush(bush) => {
+                        if bush.growth < Bush::GROWTH_TO_WOOD {
+                            bush.growth += growt_rate;
+                        } else if bush.growth
+                            < Bush::GROWTH_TO_WOOD + Bush::GROWTH_PER_BERRIES * Bush::MAX_BERRIES
                         {
-                            *growth += growt_rate;
-                            *berries +=
-                                (*growth - GameConsts::G_BUSH_WOOD) / GameConsts::G_BUSH_BERRIES;
+                            bush.growth += growt_rate;
+                            bush.berries +=
+                                (bush.growth - Bush::GROWTH_TO_WOOD) / Bush::GROWTH_PER_BERRIES;
                         }
                     }
-                    Plant::Tree { growth } => {
+                    Plant::Tree(tree) => {
                         // Stop growth if a neighbouring cell has a Tree
                         for n_cell in neighbours.iter() {
-                            if let Plant::Tree { growth: _ } = n_cell.plant {
+                            if let Plant::Tree(_) = n_cell.plant {
                                 continue;
                             }
                         }
-                        if *growth < GameConsts::G_TREE_WOOD {
-                            *growth += growt_rate;
+                        if tree.growth < Tree::GROWTH_TO_WOOD {
+                            tree.growth += growt_rate;
                         }
                     }
-                    Plant::Cane { growth } => {
-                        if *growth < GameConsts::G_CANE_SUGAR {
-                            *growth += 1;
+                    Plant::Cane(cane) => {
+                        if cane.growth < Cane::GROWTH_TO_SUGAR {
+                            cane.growth += growt_rate;
                         }
                     }
-                    Plant::Pumpkin {
-                        growth,
-                        curent_size,
-                        max_size,
-                    } => {
+                    Plant::Pumpkin(pumpkin) => {
                         let mut next_max_size = 1;
                         for n_cell in neighbours {
-                            if let Plant::Pumpkin {
-                                growth,
-                                curent_size: _,
-                                max_size: _,
-                            } = n_cell.plant
-                            {
-                                if growth >= GameConsts::G_PUMPKIN_PUMPKINSEED {
+                            if let Plant::Pumpkin(pumpkin_) = n_cell.plant {
+                                if pumpkin_.growth >= Pumpkin::GROWTH_TO_PUMPKINSEED {
                                     next_max_size += 1;
                                 }
                             }
                         }
-                        *max_size = next_max_size;
+                        pumpkin.max_size = next_max_size;
 
-                        match (GameConsts::G_PUMPKIN_PUMPKINSEED * next_max_size).cmp(growth) {
+                        match (Pumpkin::GROWTH_TO_PUMPKINSEED * pumpkin.max_size)
+                            .cmp(&pumpkin.growth)
+                        {
                             Ordering::Less => {
-                                *growth -= growt_rate;
-                                *curent_size = *growth / GameConsts::G_PUMPKIN_PUMPKINSEED;
+                                pumpkin.growth -= growt_rate;
+                                pumpkin.current_size =
+                                    pumpkin.growth / Pumpkin::GROWTH_TO_PUMPKINSEED;
                             }
                             Ordering::Equal => (),
                             Ordering::Greater => {
-                                *growth += growt_rate;
-                                *curent_size = *growth / GameConsts::G_PUMPKIN_PUMPKINSEED;
+                                pumpkin.growth += growt_rate;
+                                pumpkin.current_size =
+                                    pumpkin.growth / Pumpkin::GROWTH_TO_PUMPKINSEED;
                             }
                         }
                     }
-                    Plant::Cactus { growth, size } => {
-                        if *growth
-                            < GameConsts::G_CACTUS_CACTUSMEAT * GameConsts::MAX_CACTUS_CACTUSMEAT
-                        {
-                            *growth += growt_rate;
-                            *size = *growth / GameConsts::G_CACTUS_CACTUSMEAT;
+                    Plant::Cactus(cactus) => {
+                        if cactus.growth < Cactus::GROWTH_PER_CACTUSMEAT * Cactus::MAX_CACTUSMEAT {
+                            cactus.growth += growt_rate;
+                            cactus.size = cactus.growth / Cactus::GROWTH_PER_CACTUSMEAT;
                         }
                     }
-                    Plant::Wallbush { growth, health: _ } => {
-                        if *growth < GameConsts::G_WALLBUSH {
-                            *growth += growt_rate;
+                    Plant::Wallbush(wallbush) => {
+                        if wallbush.growth < Wallbush::GROWTH_TO_BE_READY {
+                            wallbush.growth += growt_rate;
                         }
                     }
-                    Plant::Swapshroom {
-                        growth,
-                        pair_id,
-                        active,
-                    } => {
-                        if *growth < GameConsts::G_SWAPSHROOM {
-                            *growth += growt_rate;
-                        } else if *growth == GameConsts::G_SWAPSHROOM && !(*active) {
-                            match grown_inactive_swapshrooms.entry(*pair_id) {
+                    Plant::Swapshroom(swapshroom) => {
+                        if swapshroom.growth < Swapshroom::GROWTH_TO_BE_READY {
+                            swapshroom.growth += growt_rate;
+                        } else if !swapshroom.active {
+                            match grown_inactive_swapshrooms.entry(swapshroom.pair_id) {
                                 Entry::Occupied(occupied_entry) => {
                                     occupied_entry.into_mut().push(pos);
                                 }
@@ -351,9 +282,9 @@ impl Map {
                             }
                         }
                     }
-                    Plant::Sunflower { growth, rank: _ } => {
-                        if *growth < GameConsts::G_SUNFLOWER_POWER {
-                            *growth += growt_rate;
+                    Plant::Sunflower(sunflower) => {
+                        if sunflower.growth < Sunflower::GROWTH_TO_POWER {
+                            sunflower.growth += growt_rate;
                         }
                     }
                 }
@@ -364,13 +295,8 @@ impl Map {
                 let mut ok = true;
                 for i in 0..2 {
                     let mut cell = self.get_cell(&maybe_pair[i]).clone();
-                    if let Plant::Swapshroom {
-                        growth: GameConsts::G_SWAPSHROOM,
-                        pair_id: _,
-                        active,
-                    } = &mut cell.plant
-                    {
-                        *active = true;
+                    if let Plant::Swapshroom(swapshroom) = &mut cell.plant {
+                        swapshroom.active = true;
                         self.set_cell(&maybe_pair[i], cell);
                     } else {
                         ok = false;
@@ -381,7 +307,7 @@ impl Map {
                     active_swapshrooms
                         .insert(pair_id, (maybe_pair[0].clone(), maybe_pair[1].clone()));
                 } else {
-                    eprintln!("Invalid state: Cell is Non- Grown/Swapshroom: pair_id: `{}`, maybe_pair: `{:?}` ", pair_id, maybe_pair);
+                    eprintln!("Invalid state: Cell is not a Swapshroom: pair_id: `{}`, maybe_pair: `{:?}` ", pair_id, maybe_pair);
                 }
             }
         }
@@ -423,273 +349,6 @@ impl Map {
                 drawer.write(cell).await;
             }
             drawer.write("\n".to_string()).await;
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub enum Direction {
-    Up,
-    Right,
-    Down,
-    Left,
-}
-
-impl Direction {
-    fn to_pos(&self) -> Pos {
-        match self {
-            Direction::Up => Pos { x: 0, y: -1 },
-            Direction::Right => Pos { x: 1, y: 0 },
-            Direction::Down => Pos { x: 0, y: 1 },
-            Direction::Left => Pos { x: -1, y: 0 },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Cell {
-    pub ground: Ground,
-    pub plant: Plant,
-}
-
-impl Cell {
-    pub fn to_ansi(&self) -> [String; 8] {
-        let background = match self.ground {
-            Ground::Dirt => 94,
-            Ground::Tiled => 22,
-            Ground::Sand => 142,
-            Ground::Water => 62,
-            Ground::Stone => 249,
-            Ground::Error => 13,
-        };
-
-        let (foreground, subcells) = match self.plant {
-            Plant::None => (0, [' '; 8]),
-            Plant::Wheat { growth } => {
-                let g = to_chars3(growth);
-                let m = to_chars3(GameConsts::G_WHEAT_GRAINS);
-                (184, ['W', g[0], g[1], g[2], '/', m[0], m[1], m[2]])
-            }
-            Plant::Bush { growth, berries } => {
-                let g = to_chars3(growth);
-                let b = to_chars3(berries);
-                (76, ['B', g[0], g[1], g[2], '°', b[0], b[1], b[2]])
-            }
-            Plant::Tree { growth } => {
-                let g = to_chars3(growth);
-                let m = to_chars3(GameConsts::G_TREE_WOOD);
-                (70, ['T', g[0], g[1], g[2], '/', m[0], m[1], m[2]])
-            }
-            Plant::Cane { growth } => {
-                let g = to_chars3(growth);
-                let m = to_chars3(GameConsts::G_CANE_SUGAR);
-                (0, ['C', g[0], g[1], g[2], '/', m[0], m[1], m[2]])
-            }
-            Plant::Pumpkin {
-                growth,
-                curent_size,
-                max_size,
-            } => {
-                let g = to_chars3(growth);
-                (
-                    172,
-                    [
-                        'P',
-                        g[0],
-                        g[1],
-                        g[2],
-                        '+',
-                        to_char(curent_size),
-                        '/',
-                        to_char(max_size),
-                    ],
-                )
-            }
-            Plant::Cactus { growth, size } => {
-                let g = to_chars3(growth);
-                (
-                    22,
-                    [
-                        'I',
-                        g[0],
-                        g[1],
-                        g[2],
-                        '+',
-                        to_char(size),
-                        '/',
-                        to_char(GameConsts::MAX_CACTUS_CACTUSMEAT),
-                    ],
-                )
-            }
-
-            Plant::Wallbush { growth, health } => {
-                let g = to_chars3(growth);
-                let h = to_chars3(health);
-                (22, ['#', g[0], g[1], g[2], '#', h[0], h[1], h[2]])
-            }
-            Plant::Swapshroom {
-                growth,
-                pair_id,
-                active,
-            } => {
-                let g = to_char(growth);
-                let c = pair_id.to_string().chars().take(7).collect::<Vec<char>>();
-                if active {
-                    (53, ['*', c[0], c[1], c[2], c[3], c[4], c[5], c[6]])
-                } else {
-                    (53, ['o', c[0], c[1], c[2], c[3], c[4], c[5], g])
-                }
-            }
-            Plant::Sunflower { growth, rank } => {
-                let g = to_chars3(growth);
-                let r = to_chars3(rank);
-                (11, ['S', g[0], g[1], g[2], 's', r[0], r[1], r[2]])
-            }
-        };
-        [
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[0]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[1]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[2]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[3]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[4]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[5]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[6]
-            ),
-            format!(
-                "\x1b[48;5;{}m\x1b[38;5;{}m{}\x1b[0m",
-                background, foreground, subcells[7]
-            ),
-        ]
-    }
-}
-
-fn to_char(x: u8) -> char {
-    let s = format!("{}", x);
-    s.chars().next().unwrap_or('0')
-}
-
-fn to_chars3(x: u8) -> [char; 3] {
-    let s = format!("{:03}", x);
-    let mut c = s.chars();
-    [
-        c.next().unwrap_or('0'),
-        c.next().unwrap_or('0'),
-        c.next().unwrap_or('0'),
-    ]
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Ground {
-    Dirt,
-    Tiled,
-    Sand,
-    Water,
-    Stone,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Plant {
-    None,
-    Wheat {
-        growth: u8,
-    },
-    Bush {
-        growth: u8,
-        berries: u8,
-    },
-    Tree {
-        growth: u8,
-    },
-    Cane {
-        growth: u8,
-    },
-    Pumpkin {
-        growth: u8,
-        curent_size: u8,
-        max_size: u8,
-    },
-    Cactus {
-        growth: u8,
-        size: u8,
-    },
-    Wallbush {
-        growth: u8,
-        health: u8,
-    },
-    Swapshroom {
-        growth: u8,
-        pair_id: u32,
-        active: bool,
-    },
-    Sunflower {
-        growth: u8,
-        rank: u8,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Seed {
-    Wheat,
-    Bush,
-    Tree,
-    Cane,
-    Pupkin,
-    Cactus,
-    Wallbush,
-    Swapshroom { pair_id: Option<u32> },
-    Sunflower,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub enum Harvest {
-    Grains,
-    Berry,
-    Wood,
-    Sugar,
-    PumpkinSeed,
-    CactusMeat,
-    Power,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Pos {
-    pub x: i32,
-    pub y: i32,
-}
-
-impl Pos {
-    pub fn get_next_pos_on_map(&self, direction: Option<Direction>, map_size: i32) -> Self {
-        match direction {
-            Some(direction) => {
-                // The map is Wrapping around, it's a Torus 🍩
-                let dp = direction.to_pos();
-                Self {
-                    x: (self.x + dp.x).rem_euclid(map_size),
-                    y: (self.y + dp.y).rem_euclid(map_size),
-                }
-            }
-            None => self.clone(),
         }
     }
 }
