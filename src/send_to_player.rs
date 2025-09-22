@@ -17,7 +17,10 @@ pub async fn send_to_player(
     }
 }
 
-pub async fn send_msg_to_player<M: Serialize>(to_player_tx: &mut Sender<String>, msg_to_player: M) {
+pub async fn send_msg_to_player<M: Serialize + std::fmt::Debug>(
+    to_player_tx: &mut Sender<String>,
+    msg_to_player: M,
+) {
     match serde_json::to_string(&msg_to_player) {
         Ok(msg) => {
             if let Err(err) = to_player_tx.send(msg).await {
@@ -28,7 +31,10 @@ pub async fn send_msg_to_player<M: Serialize>(to_player_tx: &mut Sender<String>,
             }
         }
         Err(err) => {
-            eprintln!("Unable to serialize Message to Player: `{}`", err);
+            eprintln!(
+                "Unable to serialize Message `{:?}` to Player: `{}`",
+                msg_to_player, err
+            );
         }
     }
 }

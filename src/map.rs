@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
 };
 
 use rand::{rngs::SmallRng, seq::SliceRandom};
@@ -25,18 +25,27 @@ impl Map {
     const GTP_SAND_CANE: u8 = 5;
     const GTP_WATER: u8 = 10;
 
-    pub fn generate_map(map_size: usize, rng: &mut SmallRng) -> Map {
+    pub fn generate_map(map_size: usize, rng: &mut SmallRng, number_of_player: u32) -> Map {
         let a = map_size * map_size;
-        let tilled_bush: usize = (a * Map::GTP_TILLED_BUSH as usize) / 100;
+        let stone: usize = number_of_player as usize;
+        let tilled_bush: usize = (a * Map::GTP_TILLED_BUSH as usize) / 100 + stone;
         let sand_empty: usize = (a * Map::GTP_SAND_EMPTY as usize) / 100 + tilled_bush;
         let sand_cane: usize = (a * Map::GTP_SAND_CANE as usize) / 100 + sand_empty;
         let water: usize = (a * Map::GTP_WATER as usize) / 100 + sand_cane;
         let pumpkin: usize = 1 + water;
         let cactus: usize = 1 + pumpkin;
+        let wallbush: usize = 1 + cactus;
+        let swapshroom_sand: usize = 1 + wallbush;
+        let swapshroom_dirt: usize = 1 + swapshroom_sand;
 
         let mut flat_map = Vec::with_capacity(a);
         for i in 0..a {
-            let cell = if tilled_bush > i {
+            let cell = if stone > i {
+                Cell {
+                    ground: Ground::Stone,
+                    plant: Plant::None,
+                }
+            } else if tilled_bush > i {
                 Cell {
                     ground: Ground::Tiled,
                     plant: Plant::Bush(Bush {
@@ -76,6 +85,32 @@ impl Map {
                     plant: Plant::Cactus(Cactus {
                         growth: Cactus::GROWTH_PER_CACTUSMEAT * Cactus::MAX_CACTUSMEAT,
                         size: Cactus::MAX_CACTUSMEAT,
+                    }),
+                }
+            } else if wallbush > i {
+                Cell {
+                    ground: Ground::Tiled,
+                    plant: Plant::Wallbush(Wallbush {
+                        growth: Wallbush::GROWTH_TO_BE_READY,
+                        health: Wallbush::MAX_HEALTH,
+                    }),
+                }
+            } else if swapshroom_sand > i {
+                Cell {
+                    ground: Ground::Sand,
+                    plant: Plant::Swapshroom(Swapshroom {
+                        growth: Swapshroom::GROWTH_TO_BE_READY,
+                        pair_id: 0,
+                        active: false,
+                    }),
+                }
+            } else if swapshroom_dirt > i {
+                Cell {
+                    ground: Ground::Dirt,
+                    plant: Plant::Swapshroom(Swapshroom {
+                        growth: Swapshroom::GROWTH_TO_BE_READY,
+                        pair_id: 0,
+                        active: false,
                     }),
                 }
             } else {
@@ -130,12 +165,29 @@ impl Map {
         eprintln!("(set_cell) Invalid Position: `{:?}`", pos);
     }
 
-    pub fn get_stones(&self) -> Vec<Pos> {
-        let mut stones = Vec::new();
+    pub fn get_wallbushes(&self) -> HashSet<Pos> {
+        let mut wallbushes = HashSet::new();
+        for (y, line) in self.map.iter().enumerate() {
+            for (x, cell) in line.iter().enumerate() {
+                if let Plant::Wallbush(wallbush) = &cell.plant {
+                    if wallbush.growth == Wallbush::GROWTH_TO_BE_READY {
+                        wallbushes.insert(Pos {
+                            x: x as i32,
+                            y: y as i32,
+                        });
+                    }
+                }
+            }
+        }
+        wallbushes
+    }
+
+    pub fn get_stones(&self) -> HashSet<Pos> {
+        let mut stones = HashSet::new();
         for (y, line) in self.map.iter().enumerate() {
             for (x, cell) in line.iter().enumerate() {
                 if let Ground::Stone = cell.ground {
-                    stones.push(Pos {
+                    stones.insert(Pos {
                         x: x as i32,
                         y: y as i32,
                     });
@@ -290,6 +342,7 @@ impl Map {
                 }
             }
         }
+        // Activate Swapshrooms
         for (pair_id, maybe_pair) in grown_inactive_swapshrooms {
             if maybe_pair.len() == 2 {
                 let mut ok = true;
@@ -300,14 +353,13 @@ impl Map {
                         self.set_cell(&maybe_pair[i], cell);
                     } else {
                         ok = false;
+                        eprintln!("Invalid state: Cell {:?} is not a Swapshroom: pair_id: `{}`, maybe_pair: `{:?}` ", cell, pair_id, maybe_pair);
                         break;
                     }
                 }
-                if !ok {
+                if ok {
                     active_swapshrooms
                         .insert(pair_id, (maybe_pair[0].clone(), maybe_pair[1].clone()));
-                } else {
-                    eprintln!("Invalid state: Cell is not a Swapshroom: pair_id: `{}`, maybe_pair: `{:?}` ", pair_id, maybe_pair);
                 }
             }
         }

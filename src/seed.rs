@@ -6,10 +6,10 @@ pub enum Seed {
     Bush,
     Tree,
     Cane,
-    Pupkin,
+    Pumpkin,
     Cactus,
     Wallbush,
-    Swapshroom { pair_id: Option<u32> },
+    Swapshroom,
     Sunflower,
 }
 

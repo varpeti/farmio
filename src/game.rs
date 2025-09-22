@@ -1,7 +1,7 @@
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
     time::Duration,
 };
 use tokio::{
@@ -19,6 +19,7 @@ use crate::{
     harvest::Harvest,
     map::Map,
     plant::{Bush, Cactus, Cane, Plant, Pumpkin, Sunflower, Swapshroom, Tree, Wallbush, Wheat},
+    player::Player,
     pos::Pos,
     seed::Seed,
     send_to_player::send_msg_to_player,
@@ -74,7 +75,6 @@ pub enum MsgToPlayer {
     Planted,
     NotEnoughSeed,
     WrongGroundType,
-    InvalidSwapshroomUuid,
     // Trade //
     Traded,
     NotEnoughHarvest,
@@ -91,8 +91,8 @@ pub enum MsgToPlayer {
 #[derive(Debug, Serialize)]
 pub enum BlockedBy {
     AnotherPlayer,
-    WallBush,   // TODO:
-    Swapshroom, // TODO
+    WallBush,
+    Swapshroom,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,7 +134,11 @@ impl Game {
         let mut rng = rand::rngs::SmallRng::seed_from_u64(game_settings.seed);
         let players = HashMap::new();
         let mut drawer = Drawer::new(game_name.clone()).await;
-        let map = Map::generate_map(game_settings.map_size as usize, &mut rng);
+        let map = Map::generate_map(
+            game_settings.map_size as usize,
+            &mut rng,
+            game_settings.number_of_players,
+        );
         map.print_map_with_players(&mut drawer, &HashMap::new())
             .await;
         let swapshrooms = HashMap::new();
@@ -187,29 +191,35 @@ impl Game {
                         send_msg_to_player(&mut to_player_tx, MsgToPlayer::AlreadyConnected).await;
                     }
                     Entry::Vacant(vacant_entry) => {
-                        let player = vacant_entry.insert(Player::new(
-                            player_name,
-                            to_player_tx,
-                            self.game_settings.map_size as i32,
-                            player_positions,
-                            &mut self.rng,
-                        ));
-                        self.map.set_cell(
-                            &player.pos,
-                            Cell {
-                                ground: Ground::Stone,
-                                plant: Plant::None,
-                            },
-                        );
-                        println!("{} Player `{}` Connected", p, player.player_name);
-                        send_msg_to_player(
-                            &mut player.to_player_tx,
-                            MsgToPlayer::Connected {
-                                game_settings: self.game_settings.clone(),
-                                players_connected: players_connected + 1,
-                            },
-                        )
-                        .await;
+                        let stones = self.map.get_stones();
+                        let mut free_spots = stones.difference(&player_positions);
+
+                        match free_spots.next() {
+                            Some(pos) => {
+                                let player = vacant_entry.insert(Player::new(
+                                    player_name,
+                                    to_player_tx,
+                                    pos.to_owned(),
+                                ));
+                                println!("{} Player `{}` Connected", p, player.player_name);
+                                send_msg_to_player(
+                                    &mut player.to_player_tx,
+                                    MsgToPlayer::Connected {
+                                        game_settings: self.game_settings.clone(),
+                                        players_connected: players_connected + 1,
+                                    },
+                                )
+                                .await;
+                            }
+                            None => {
+                                println!(
+                                    "{} No free spots left in the map for Player `{}`",
+                                    p, player_name
+                                );
+                                send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull)
+                                    .await;
+                            }
+                        }
                     }
                 }
                 if self.players.len() as u32 == self.game_settings.number_of_players {
@@ -345,15 +355,7 @@ impl Game {
                     action_plant(&mut self.map, player, seed, &mut self.rng).await
                 }
                 Action::Trade { seed, volume } => {
-                    action_trade(
-                        &mut self.map,
-                        player,
-                        seed,
-                        volume,
-                        &mut self.rng,
-                        &self.active_swapshrooms,
-                    )
-                    .await
+                    action_trade(&mut self.map, player, seed, volume).await
                 }
                 Action::Till => action_till(&mut self.map, player).await,
                 Action::__Connect__ {
@@ -363,11 +365,12 @@ impl Game {
             }
         }
         action_move_execution(
-            &self.map,
+            &mut self.map,
             &mut self.players,
             next_positions,
             moving_players,
             swap_players,
+            &self.active_swapshrooms,
         )
         .await;
     }
@@ -392,11 +395,12 @@ fn action_move_collection(
 }
 
 async fn action_move_execution(
-    map: &Map,
+    map: &mut Map,
     players: &mut HashMap<Uuid, Player>,
     mut next_positions: HashMap<Pos, Vec<Uuid>>,
     moving_players: Vec<Uuid>,
     swap_players: Vec<(Pos, Pos)>,
+    active_swapshrooms: &HashMap<u32, (Pos, Pos)>,
 ) {
     for (player_uuid, player) in players.iter_mut() {
         if !moving_players.contains(player_uuid) {
@@ -409,17 +413,63 @@ async fn action_move_execution(
             );
         }
     }
+
+    let wallbushes = map.get_wallbushes();
+    let mut swapshrooms = HashSet::<Pos>::new();
+    for (_, (p1, p2)) in active_swapshrooms.iter() {
+        swapshrooms.insert(p1.to_owned());
+        swapshrooms.insert(p2.to_owned());
+    }
+
     for (pos, uuids) in next_positions {
+        // Wants to move to a WallBush
+        if wallbushes.contains(&pos) {
+            for uuid in uuids.iter() {
+                let player = players.get_mut(uuid).unwrap();
+                msg_to_player_with_game_content(
+                    map,
+                    player,
+                    MsgToPlayer::BlockedBy(BlockedBy::WallBush),
+                )
+                .await;
+            }
+            let mut cell = map.get_cell(&pos).to_owned();
+            if let Plant::Wallbush(wallbush) = &mut cell.plant {
+                wallbush.health = wallbush.health.saturating_sub(1);
+                if wallbush.health == 0 {
+                    cell.plant = Plant::None
+                }
+            }
+            map.set_cell(&pos, cell);
+            continue;
+        }
+
         if uuids.len() == 1 {
+            // No player wants to occupie the same position
+
             let player = players.get_mut(&uuids[0]).unwrap();
+            // If player staning still, do not send notification
             if player.pos == pos {
                 continue;
             }
+            // Wants to move from an active Swapshrooms
+            if swapshrooms.contains(&player.pos) {
+                msg_to_player_with_game_content(
+                    map,
+                    player,
+                    MsgToPlayer::BlockedBy(BlockedBy::Swapshroom),
+                )
+                .await;
+                continue;
+            }
+            // Can move
             player.pos = pos;
             msg_to_player_with_game_content(map, player, MsgToPlayer::Moved).await;
         } else {
+            // AnotherPlayer occupies or tried to occupie the same spot
             for uuid in uuids {
                 let player = players.get_mut(&uuid).unwrap();
+                // If player staning still, do not send notification
                 if player.pos == pos {
                     continue;
                 }
@@ -433,6 +483,7 @@ async fn action_move_execution(
         }
     }
 
+    // Swap occures after movements
     for (_, player) in players.iter_mut() {
         for (p1, p2) in swap_players.iter() {
             if player.pos == *p1 {
@@ -539,13 +590,13 @@ async fn action_harvest(
                     Entry::Occupied(occupied_entry) => {
                         let (p1, p2) = occupied_entry.remove();
                         let mut c1 = map.get_cell(&p1).clone();
-                        c1.plant = Plant::None;
                         let mut c2 = map.get_cell(&p2).clone();
+                        c1.plant = Plant::None;
                         c2.plant = Plant::None;
                         map.set_cell(&p1, c2);
                         map.set_cell(&p2, c1);
                         swap_players.push((p1, p2));
-                        MsgToPlayer::Swapped
+                        return; // Message sent by the swapping action
                     }
                     Entry::Vacant(_vacant_entry) => {
                         eprintln!("Active Swapshroom but not in active_swapshrooms?");
@@ -600,7 +651,7 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
             }),
             (Seed::Tree, Ground::Dirt) => Plant::Tree(Tree { growth: 0 }),
             (Seed::Cane, Ground::Sand) => Plant::Cane(Cane { growth: 0 }),
-            (Seed::Pupkin, Ground::Tiled) => Plant::Pumpkin(Pumpkin {
+            (Seed::Pumpkin, Ground::Tiled) => Plant::Pumpkin(Pumpkin {
                 growth: 0,
                 current_size: 1,
                 max_size: 1,
@@ -610,21 +661,12 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
                 growth: 0,
                 health: Wallbush::MAX_HEALTH,
             }),
-            (Seed::Swapshroom { pair_id }, _) => {
-                if let Some(pair_id) = pair_id {
-                    Plant::Swapshroom(Swapshroom {
-                        growth: 0,
-                        pair_id,
-                        active: false,
-                    })
-                } else {
-                    return msg_to_player_with_game_content(
-                        map,
-                        player,
-                        MsgToPlayer::InvalidSwapshroomUuid,
-                    )
-                    .await;
-                }
+            (Seed::Swapshroom, _) => {
+                Plant::Swapshroom(Swapshroom {
+                    growth: 0,
+                    pair_id: todo!(), // TODO: Generate pair_id
+                    active: false,
+                })
             }
             (Seed::Sunflower, Ground::Stone) => {
                 let stones = map.get_stones();
@@ -653,14 +695,7 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
     msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughSeed).await;
 }
 
-async fn action_trade(
-    map: &mut Map,
-    player: &mut Player,
-    seed: Seed,
-    volume: u32,
-    rng: &mut SmallRng,
-    active_swapshrooms: &HashMap<u32, (Pos, Pos)>,
-) {
+async fn action_trade(map: &mut Map, player: &mut Player, seed: Seed, volume: u32) {
     if volume == 0 {
         return msg_to_player_with_game_content(map, player, MsgToPlayer::InvalidTrade).await;
     }
@@ -672,7 +707,7 @@ async fn action_trade(
         Seed::Bush => vec![(Harvest::Grains, Seed::TRADE_GRAINS_FOR_BUSH)],
         Seed::Tree => vec![(Harvest::Wood, Seed::TRADE_WOOD_FOR_TREE)],
         Seed::Cane => vec![(Harvest::Grains, Seed::TRADE_GRAINS_FOR_CANE)],
-        Seed::Pupkin => vec![
+        Seed::Pumpkin => vec![
             (Harvest::Berry, Seed::TRADE_BERRIES_FOR_PUMPKIN),
             (Harvest::Wood, Seed::TRADE_WOOD_FOR_PUMPKIN),
         ],
@@ -681,31 +716,7 @@ async fn action_trade(
             (Harvest::Wood, Seed::TRADE_WOOD_FOR_CACTUS),
         ],
         Seed::Wallbush => vec![(Harvest::PumpkinSeed, Seed::TRADE_PUMKINSEED_FOR_WALLBUSH)],
-        Seed::Swapshroom { pair_id: _ } => {
-            if let Some(available_harvest_volume) = player.harvests.get_mut(&Harvest::CactusMeat) {
-                *available_harvest_volume -= Seed::TRADE_CACTUSMEAT_FOR_SWAPSHROOM * volume;
-                // For each volume we gave two seed with matching pair_id
-                for _ in 0..volume {
-                    // pair_id is unique
-                    let mut pair_id: u32;
-                    loop {
-                        pair_id = rng.random();
-                        if !active_swapshrooms.contains_key(&pair_id) {
-                            break;
-                        }
-                    }
-                    player.seeds.insert(
-                        Seed::Swapshroom {
-                            pair_id: Some(pair_id),
-                        },
-                        2,
-                    );
-                }
-                return msg_to_player_with_game_content(map, player, MsgToPlayer::Traded).await;
-            }
-            return msg_to_player_with_game_content(map, player, MsgToPlayer::NotEnoughHarvest)
-                .await;
-        }
+        Seed::Swapshroom => vec![(Harvest::CactusMeat, Seed::TRADE_CACTUSMEAT_FOR_SWAPSHROOM)],
         Seed::Sunflower => vec![
             (Harvest::PumpkinSeed, Seed::TRADE_PUMKINSEED_FOR_SUNFLOWER),
             (Harvest::CactusMeat, Seed::TRADE_CACTUSMEAT_FOR_SUNFLOWER),
@@ -777,62 +788,6 @@ async fn action_till(map: &mut Map, player: &mut Player) {
         }
     }
     msg_to_player_with_game_content(map, player, MsgToPlayer::Tilled).await;
-}
-
-pub struct Player {
-    pub player_name: String,
-    pub to_player_tx: Sender<String>,
-    pub pos: Pos,
-    pub harvests: HashMap<Harvest, u32>,
-    pub seeds: HashMap<Seed, u32>,
-    pub points: u32,
-}
-
-impl Player {
-    fn new(
-        player_name: String,
-        to_player_tx: Sender<String>,
-        map_size: i32,
-        player_positions: Vec<Pos>,
-        rng: &mut SmallRng,
-    ) -> Self {
-        let mut x;
-        let mut y;
-        loop {
-            (x, y) = (rng.random_range(0..map_size), rng.random_range(0..map_size));
-            let mut ok = true;
-            for pos in player_positions.iter() {
-                if pos.x == x && pos.y == y {
-                    ok = false;
-                }
-            }
-            if ok {
-                break;
-            }
-        }
-
-        Self {
-            player_name,
-            to_player_tx,
-            pos: Pos { x, y },
-            harvests: HashMap::new(),
-            seeds: HashMap::new(),
-            points: 0,
-        }
-    }
-
-    fn harvest(&mut self, harvest: Harvest, volume: u32, points: u32) -> MsgToPlayer {
-        match self.harvests.entry(harvest.clone()) {
-            Entry::Occupied(occupied_entry) => {
-                *occupied_entry.into_mut() += volume;
-            }
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(volume);
-            }
-        }
-        self.points += points * volume;
-        MsgToPlayer::Harvested { harvest, volume }
-    }
 }
 
 async fn msg_to_player_with_game_content(map: &Map, player: &mut Player, result: MsgToPlayer) {

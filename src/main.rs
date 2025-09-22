@@ -7,6 +7,7 @@ mod handle_connection;
 mod harvest;
 mod map;
 mod plant;
+mod player;
 mod pos;
 mod seed;
 mod send_to_player;

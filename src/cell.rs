@@ -79,20 +79,18 @@ impl Cell {
             Plant::Wallbush(wallbush) => {
                 let g = to_chars3(wallbush.growth);
                 let h = to_chars3(wallbush.health);
-                (22, ['#', g[0], g[1], g[2], '#', h[0], h[1], h[2]])
+                (0, ['#', g[0], g[1], g[2], '#', h[0], h[1], h[2]])
             }
             Plant::Swapshroom(swapshroom) => {
                 let g = to_char(swapshroom.growth);
-                let c = swapshroom
-                    .pair_id
-                    .to_string()
+                let c = format!("{:07}", swapshroom.pair_id)
                     .chars()
                     .take(7)
                     .collect::<Vec<char>>();
                 if swapshroom.active {
                     (53, ['*', c[0], c[1], c[2], c[3], c[4], c[5], c[6]])
                 } else {
-                    (53, ['o', c[0], c[1], c[2], c[3], c[4], c[5], g])
+                    (53, [g, c[0], c[1], c[2], c[3], c[4], c[5], c[6]])
                 }
             }
             Plant::Sunflower(sunflower) => {
