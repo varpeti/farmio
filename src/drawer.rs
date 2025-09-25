@@ -38,9 +38,6 @@ impl Drawer {
         let file = self.file.clone();
         //tokio::spawn(async move {
         let mut file = file.lock().await;
-        if let Err(err) = file.set_len(0).await {
-            eprintln!("Unable to clear file: `{}`", err);
-        }
         if let Err(err) = file.seek(std::io::SeekFrom::Start(0)).await {
             eprintln!("Unable to jump to the begining of the file: `{}`", err);
         }

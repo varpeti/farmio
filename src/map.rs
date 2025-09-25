@@ -7,8 +7,8 @@ use rand::{rngs::SmallRng, seq::SliceRandom};
 
 use crate::{
     cell::Cell,
-    dawing::Drawer,
     direction::Direction,
+    drawer::Drawer,
     ground::Ground,
     plant::{Bush, Cactus, Cane, Plant, Pumpkin, Sunflower, Swapshroom, Tree, Wallbush, Wheat},
     pos::Pos,
@@ -32,11 +32,6 @@ impl Map {
         let sand_empty: usize = (a * Map::GTP_SAND_EMPTY as usize) / 100 + tilled_bush;
         let sand_cane: usize = (a * Map::GTP_SAND_CANE as usize) / 100 + sand_empty;
         let water: usize = (a * Map::GTP_WATER as usize) / 100 + sand_cane;
-        let pumpkin: usize = 1 + water;
-        let cactus: usize = 1 + pumpkin;
-        let wallbush: usize = 1 + cactus;
-        let swapshroom_sand: usize = 1 + wallbush;
-        let swapshroom_dirt: usize = 1 + swapshroom_sand;
 
         let mut flat_map = Vec::with_capacity(a);
         for i in 0..a {
@@ -69,49 +64,6 @@ impl Map {
                 Cell {
                     ground: Ground::Water,
                     plant: Plant::None,
-                }
-            } else if pumpkin > i {
-                Cell {
-                    ground: Ground::Tiled,
-                    plant: Plant::Pumpkin(Pumpkin {
-                        growth: Pumpkin::GROWTH_TO_PUMPKINSEED,
-                        current_size: 1,
-                        max_size: 1,
-                    }),
-                }
-            } else if cactus > i {
-                Cell {
-                    ground: Ground::Sand,
-                    plant: Plant::Cactus(Cactus {
-                        growth: Cactus::GROWTH_PER_CACTUSMEAT * Cactus::MAX_CACTUSMEAT,
-                        size: Cactus::MAX_CACTUSMEAT,
-                    }),
-                }
-            } else if wallbush > i {
-                Cell {
-                    ground: Ground::Tiled,
-                    plant: Plant::Wallbush(Wallbush {
-                        growth: Wallbush::GROWTH_TO_BE_READY,
-                        health: Wallbush::MAX_HEALTH,
-                    }),
-                }
-            } else if swapshroom_sand > i {
-                Cell {
-                    ground: Ground::Sand,
-                    plant: Plant::Swapshroom(Swapshroom {
-                        growth: Swapshroom::GROWTH_TO_BE_READY,
-                        pair_id: 0,
-                        active: false,
-                    }),
-                }
-            } else if swapshroom_dirt > i {
-                Cell {
-                    ground: Ground::Dirt,
-                    plant: Plant::Swapshroom(Swapshroom {
-                        growth: Swapshroom::GROWTH_TO_BE_READY,
-                        pair_id: 0,
-                        active: false,
-                    }),
                 }
             } else {
                 Cell {
@@ -233,15 +185,27 @@ impl Map {
                     x: x as i32,
                     y: y as i32,
                 };
-                let neighbours = map_clone.get_neighbours(&pos);
 
+                let neighbours = map_clone.get_neighbours(&pos);
                 let mut growt_rate = 1u8;
-                // Water
+                let mut cactus_in_the_neighbours = false;
                 for n_cell in neighbours.iter() {
+                    // Water boosts the growth rate by 2
                     if let Ground::Water = n_cell.ground {
                         growt_rate = 2;
-                        break;
                     }
+                    // Cactus kills
+                    if let Plant::Cactus(_) = n_cell.plant {
+                        if let Plant::Swapshroom(_) = cell.plant {
+                            // Swapshroom is immune to Cactus
+                        } else {
+                            cell.plant = Plant::None;
+                            cactus_in_the_neighbours = true;
+                        }
+                    }
+                }
+                if cactus_in_the_neighbours {
+                    continue;
                 }
 
                 match &mut cell.plant {
@@ -382,7 +346,7 @@ impl Map {
                     for i in 0..4 {
                         map[y * 2][x * 4 + i] = c[i].clone();
                     }
-                    for (i, c) in player_name.chars().take(3).enumerate() {
+                    for (i, c) in player_name.chars().take(4).enumerate() {
                         map[y * 2 + 1][x * 4 + i] = c.to_string();
                     }
                 } else {

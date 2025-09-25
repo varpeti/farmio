@@ -1,6 +1,6 @@
 mod cell;
-mod dawing;
 mod direction;
+mod drawer;
 mod game;
 mod ground;
 mod handle_connection;

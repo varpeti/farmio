@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     cell::Cell,
-    dawing::Drawer,
     direction::Direction,
+    drawer::Drawer,
     ground::Ground,
     handle_connection::PlayerAction,
     harvest::Harvest,
@@ -75,6 +75,7 @@ pub enum MsgToPlayer {
     Planted,
     NotEnoughSeed,
     WrongGroundType,
+    CannotPlantOver,
     // Trade //
     Traded,
     NotEnoughHarvest,
@@ -415,10 +416,10 @@ async fn action_move_execution(
     }
 
     let wallbushes = map.get_wallbushes();
-    let mut swapshrooms = HashSet::<Pos>::new();
+    let mut active_swapshroom_positions = HashSet::<Pos>::new();
     for (_, (p1, p2)) in active_swapshrooms.iter() {
-        swapshrooms.insert(p1.to_owned());
-        swapshrooms.insert(p2.to_owned());
+        active_swapshroom_positions.insert(p1.to_owned());
+        active_swapshroom_positions.insert(p2.to_owned());
     }
 
     for (pos, uuids) in next_positions {
@@ -448,12 +449,12 @@ async fn action_move_execution(
             // No player wants to occupie the same position
 
             let player = players.get_mut(&uuids[0]).unwrap();
-            // If player staning still, do not send notification
+            // If player standing still, do not send notification
             if player.pos == pos {
                 continue;
             }
             // Wants to move from an active Swapshrooms
-            if swapshrooms.contains(&player.pos) {
+            if active_swapshroom_positions.contains(&player.pos) {
                 msg_to_player_with_game_content(
                     map,
                     player,
@@ -469,7 +470,7 @@ async fn action_move_execution(
             // AnotherPlayer occupies or tried to occupie the same spot
             for uuid in uuids {
                 let player = players.get_mut(&uuid).unwrap();
-                // If player staning still, do not send notification
+                // If player standing still, do not send notification
                 if player.pos == pos {
                     continue;
                 }
@@ -643,6 +644,12 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
         }
         *volume -= 1;
         let mut cell = map.get_cell(&player.pos).to_owned();
+
+        if let Plant::Wallbush(_) | Plant::Swapshroom(_) = cell.plant {
+            return msg_to_player_with_game_content(map, player, MsgToPlayer::CannotPlantOver)
+                .await;
+        }
+
         let plant = match (seed, cell.clone().ground) {
             (Seed::Wheat, Ground::Dirt | Ground::Tiled) => Plant::Wheat(Wheat { growth: 0 }),
             (Seed::Bush, Ground::Tiled) => Plant::Bush(Bush {
@@ -662,9 +669,20 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
                 health: Wallbush::MAX_HEALTH,
             }),
             (Seed::Swapshroom, _) => {
+                let pair_id = match player.next_swapshroom_pair_id {
+                    Some(pair_id) => {
+                        player.next_swapshroom_pair_id = None;
+                        pair_id
+                    }
+                    None => {
+                        let pair_id = rng.random_range(u32::MIN..u32::MAX);
+                        player.next_swapshroom_pair_id = Some(pair_id);
+                        pair_id
+                    }
+                };
                 Plant::Swapshroom(Swapshroom {
                     growth: 0,
-                    pair_id: todo!(), // TODO: Generate pair_id
+                    pair_id,
                     active: false,
                 })
             }
@@ -672,14 +690,19 @@ async fn action_plant(map: &mut Map, player: &mut Player, seed: Seed, rng: &mut 
                 let stones = map.get_stones();
                 for pos in stones {
                     let mut cell = map.get_cell(&pos).to_owned();
-                    // Overwriting the existing ones, maybe skip if already has Sunflower?
-                    // By overwriteing a player gets "Notified" by inspecting the rank again
-                    // By not overwriteing a player can cause another player to fail (if lucky)
-                    cell.plant = Plant::Sunflower(Sunflower {
-                        growth: 0,
-                        rank: rng.random_range(u8::MIN..u8::MAX),
-                    });
-                    map.set_cell(&pos, cell);
+
+                    if let Plant::Swapshroom(_) = cell.plant {
+                        // Swapshroom is immune to Sunflower spawning
+                    } else {
+                        // Overwriting the existing ones, maybe skip if already has Sunflower?
+                        // By overwriteing a player gets "Notified" by inspecting the rank again
+                        // By not overwriteing a player can cause another player to fail (if lucky)
+                        cell.plant = Plant::Sunflower(Sunflower {
+                            growth: 0,
+                            rank: rng.random_range(u8::MIN..u8::MAX),
+                        });
+                        map.set_cell(&pos, cell);
+                    }
                 }
                 return msg_to_player_with_game_content(map, player, MsgToPlayer::Planted).await;
             }
@@ -754,7 +777,7 @@ async fn action_trade_helper(
                 *occupied_entry.into_mut() += volume;
             }
             Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(1);
+                vacant_entry.insert(volume);
             }
         }
         msg_to_player_with_game_content(map, player, MsgToPlayer::Traded).await;
@@ -765,15 +788,31 @@ async fn action_trade_helper(
 
 async fn action_till(map: &mut Map, player: &mut Player) {
     let cell = map.get_cell(&player.pos).to_owned();
-    match cell.ground {
-        Ground::Dirt => map.set_cell(
+    match (cell.ground, cell.plant) {
+        (Ground::Dirt, Plant::Swapshroom(swapshroom)) => map.set_cell(
+            &player.pos,
+            Cell {
+                ground: Ground::Tiled,
+                plant: Plant::Swapshroom(swapshroom),
+            },
+        ),
+        (Ground::Tiled, Plant::Swapshroom(swapshroom)) => {
+            map.set_cell(
+                &player.pos,
+                Cell {
+                    ground: Ground::Dirt,
+                    plant: Plant::Swapshroom(swapshroom),
+                },
+            );
+        }
+        (Ground::Dirt, _) => map.set_cell(
             &player.pos,
             Cell {
                 ground: Ground::Tiled,
                 plant: Plant::None,
             },
         ),
-        Ground::Tiled => {
+        (Ground::Tiled, _) => {
             map.set_cell(
                 &player.pos,
                 Cell {
