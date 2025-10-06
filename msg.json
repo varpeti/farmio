@@ -1,0 +1,27 @@
+{ "NewGame" : { "player_name" : "P001", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name" : "Game1", "game_settings" : { "number_of_players" : 1, "turn_duration_ms" : 100000, "map_size" : 8, "seed": 123456789 } } }
+
+{ "JoinGame" : { "player_name" : "P001", "player_uuid" : "68c8efba-956b-412f-a8df-7066f36383bc", "game_name": "Game1" } }
+
+
+{ "JoinGame" : { "player_name" : "P002", "player_uuid" : "ca91129c-09ca-40fd-8c8c-7f9a78ab2f8e", "game_name": "Game1" } }
+
+
+{ "JoinGame" : { "player_name" : "P003", "player_uuid" : "dc0b855b-ae92-45fd-9da8-ede09175371e", "game_name": "Game1" } }
+
+
+{ "Move" : { "direction" : "Up" } }
+{ "Move" : { "direction" : "Right" } }
+{ "Move" : { "direction" : "Down" } }
+{ "Move" : { "direction" : "Left" } }
+"Harvest"
+{ "Trade": { "seed": "Bush", "volume": 1 } }
+{ "Trade": { "seed": "Cane", "volume": 1 } }
+{ "Trade": { "seed": "Tree", "volume": 1 } }
+{ "Trade": { "seed": "Pumpkin", "volume": 1 } }
+{ "Trade": { "seed": "Cactus", "volume": 1 } }
+{ "Trade": { "seed": "Wallbush", "volume": 1 } }
+{ "Trade": { "seed": "Swapshroom", "volume": 2 } }
+{ "Trade": { "seed": "Sunflower", "volume": 1 } }
+
+{ "Plant": { "seed": "Cactus"} }
+{ "Plant": { "seed": "Swapshroom"} }
