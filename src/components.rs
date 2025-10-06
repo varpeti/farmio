@@ -15,9 +15,3 @@ pub struct CUuid {
 pub struct CToPlayerTx {
     pub to_player_tx: Sender<String>,
 }
-
-// #[derive(Component, Debug)]
-// pub struct Position {
-//     pub x: u32,
-//     pub y: u32,
-// }
