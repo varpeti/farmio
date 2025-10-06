@@ -29,3 +29,8 @@ impl RTurnDurationTimer {
         }
     }
 }
+
+#[derive(Resource, Default)]
+pub struct RTurnActionReceived {
+    pub num: u32,
+}

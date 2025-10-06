@@ -1,5 +1,4 @@
 mod components;
-mod map;
 mod player;
 mod resources;
 mod systems;
@@ -20,12 +19,8 @@ use crate::{
 };
 // TODO: Read from config
 const IP_PORT: &str = "127.0.0.1:5942";
-const NUMBER_OF_PLAYERS: u32 = 1;
+const NUMBER_OF_PLAYERS: u32 = 2;
 const TURN_DURATION_MS: u64 = 10000;
-
-fn setup_camera_system(mut commands: Commands) {
-    commands.spawn(Camera2d);
-}
 
 fn main() {
     let (to_game_tx, to_game_rx) = mpsc::channel(1024);
@@ -39,7 +34,6 @@ fn main() {
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_systems(Startup, setup_camera_system)
         .insert_resource(RToGameRx { to_game_rx })
         .insert_resource(RGameSettings {
             number_of_players: NUMBER_OF_PLAYERS,

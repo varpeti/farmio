@@ -8,7 +8,7 @@ use crate::{
         BPlayer, CAction, MPlayer, Notifications, PlayerAction, player_action_idle,
         player_action_move,
     },
-    resources::{GameState, RGameSettings, RTurnDurationTimer},
+    resources::{GameState, RGameSettings, RTurnActionReceived, RTurnDurationTimer},
     tcp_network::{RToGameRx, try_msg_to_player},
 };
 
@@ -68,6 +68,7 @@ pub fn wait_for_connections(
                             commands.insert_resource(RTurnDurationTimer::new(
                                 game_settings.turn_duration_ms,
                             ));
+                            commands.insert_resource(RTurnActionReceived::default());
                             for (_c_name, _c_uuid, c_to_player_tx, _e_player) in players {
                                 try_msg_to_player(
                                     &mut c_to_player_tx.to_player_tx.clone(),
@@ -107,7 +108,7 @@ pub fn collect_player_actions(
     mut next_state: ResMut<NextState<GameState>>,
     time: Res<Time>,
     mut turn_duration_timer: ResMut<RTurnDurationTimer>,
-    game_settings: Res<RGameSettings>,
+    mut turn_action_received: ResMut<RTurnActionReceived>,
     mut r_to_game_rx: ResMut<RToGameRx>,
     players: Query<(&CName, &CUuid, &CToPlayerTx, Entity), With<MPlayer>>,
     actions: Query<&CAction, With<MPlayer>>,
@@ -164,16 +165,15 @@ pub fn collect_player_actions(
         }
     }
 
-    let action_received = !actions
+    let all_action_received = !actions
         .iter()
-        .filter(|c_action| !matches!(&c_action, CAction::NoActionReceived))
-        .count(); // FIXME: Its not a normal number...
+        .any(|c_action| matches!(&c_action, CAction::NoActionReceived));
 
-    if turn_is_ending || action_received == game_settings.number_of_players as usize {
+    if turn_is_ending || all_action_received {
         turn_duration_timer.timer.reset();
         info!(
-            "Turn is ending (time is up: `{}`, all actions received: `{}/{}` )",
-            turn_is_ending, action_received, game_settings.number_of_players
+            "Turn is ending (time is up: `{}`, all actions received: `{}` )",
+            turn_is_ending, all_action_received
         );
         next_state.set(GameState::HandlePlayerActions);
     }

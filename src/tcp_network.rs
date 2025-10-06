@@ -1,3 +1,5 @@
+use core::error;
+
 use bevy::{asset::uuid::Uuid, prelude::*};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
