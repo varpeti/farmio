@@ -1,8 +1,1 @@
-{ "Connect" : { "name": "P001", "uuid": "b6cd5e0c-0679-4d74-a99f-6b745c2de525" }}
-
-{ "Connect" : { "name": "P002", "uuid": "b852deee-6af0-4917-8deb-0b6e8611e3f1" }}
-
-
-"Idle"
-
-{ "Move" : { "direction": "Up" } }
+{ "Connect" : { "player_name": "P001", "player_uuid": "b6cd5e0c-0679-4d74-a99f-6b745c2de525" }}
