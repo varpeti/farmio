@@ -1,19 +1,20 @@
 [package]
 name = "farmio"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-bevy = "0.16"
 tokio = { version = "1.47", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
+rand = "0.9"
+dashmap = "6.1"
+uuid = { version = "1.18", features = ["v4", "serde"] }
 
 [profile.dev]
-opt-level = 1
+opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 3
