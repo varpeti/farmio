@@ -144,6 +144,15 @@ pub async fn handle_connection(framed: Framed<TcpStream, LinesCodec>, games: Gam
     }
 
     println!("Player `{:?}` disconnecting...", s_player_name);
+    send_msg_to_game(
+        &mut s_to_game_tx,
+        Action::__Disconnect__,
+        &s_player_uuid,
+        &s_player_name,
+        &s_game_name,
+        &mut to_player_tx,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]

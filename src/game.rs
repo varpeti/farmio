@@ -45,7 +45,8 @@ pub enum Action {
         player_name: String,
         to_player_tx: Sender<String>,
     },
-    // TODO: __Disconnect__
+    #[serde(skip_deserializing)]
+    __Disconnect__,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,7 +258,13 @@ impl Game {
 
     async fn game_loop(&mut self) {
         let turn_duration = Duration::from_millis(self.game_settings.turn_duration_ms as u64);
+
         loop {
+            // TODO: collect actions
+            //       process actions
+            //       update map
+            //       send back the results
+            //       log the state (or actions, for replay)
             let player_actions = self.collect_player_actions(turn_duration).await;
             self.process_player_actions(player_actions).await;
             self.map.update_map(&mut self.active_swapshrooms);
@@ -271,45 +278,59 @@ impl Game {
                         .collect(),
                 )
                 .await;
+            // TODO: end if all players are disconnected
+            // TODO: End the game if a player reaches a certain score
             self.turns += 1;
         }
-        // TODO: End the game if a player reaches a certain score
     }
 
     async fn collect_player_actions(&mut self, turn_duration: Duration) -> HashMap<Uuid, Action> {
         let p = self.p();
         let mut player_actions = HashMap::<Uuid, Action>::new();
         while let Ok(Some(player_action)) = timeout(turn_duration, self.to_game_rx.recv()).await {
-            if let Action::__Connect__ {
-                player_name,
-                mut to_player_tx,
-            } = player_action.action
-            {
-                match self.players.entry(player_action.player_uuid) {
-                    Entry::Occupied(occupied_entry) => {
-                        let player = occupied_entry.into_mut();
-                        println!("{} Player `{}` Reconnected", p, player_name);
-                        player.to_player_tx = to_player_tx;
-                        send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Reconnected)
-                            .await;
-                    }
-                    Entry::Vacant(_vacant_entry) => {
-                        // This is unreachable, because the Player guard on top of the game_loop
-                        eprintln!(
-                            "{} Player `{}` tried to connect to the game, but it is already full!",
-                            p, player_name
-                        );
-                        send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull).await;
+            match player_action.action {
+                Action::__Connect__ {
+                    player_name,
+                    mut to_player_tx,
+                } => {
+                    match self.players.entry(player_action.player_uuid) {
+                        Entry::Occupied(occupied_entry) => {
+                            let player = occupied_entry.into_mut();
+                            println!("{} Player `{}` Reconnected", p, player_name);
+                            player.to_player_tx = to_player_tx;
+                            player.connected = true;
+                            send_msg_to_player(&mut player.to_player_tx, MsgToPlayer::Reconnected)
+                                .await;
+                        }
+                        Entry::Vacant(_vacant_entry) => {
+                            // This is unreachable, because the Player guard on top of the game_loop
+                            eprintln!(
+                                            "{} Player `{}` tried to connect to the game, but it is already full!",
+                                            p, player_name
+                                        );
+                            send_msg_to_player(&mut to_player_tx, MsgToPlayer::GameIsFull).await;
+                        }
                     }
                 }
-                continue; // Connect Action is not counted towards this turn
-            }
-            // Players can overwrite their own action
-            player_actions.insert(player_action.player_uuid, player_action.action);
+                Action::__Disconnect__ => match self.players.entry(player_action.player_uuid) {
+                    Entry::Occupied(occupied_entry) => {
+                        let player = occupied_entry.into_mut();
+                        player.connected = false;
+                        println!("{} Player `{}` disconnected!", p, player.player_name)
+                    }
+                    Entry::Vacant(_vacant_entry) => {
+                        eprintln!("{} Unkonw Player tried to disconnect", p)
+                    }
+                },
+                action => {
+                    // Players can overwrite their own action
+                    player_actions.insert(player_action.player_uuid, action);
 
-            // If all player did an action we can fastforward to the processing of the turn
-            if player_actions.len() == self.players.len() {
-                break;
+                    // If all player did an action we can fastforward to the processing of the turn
+                    if player_actions.len() == self.players.len() {
+                        break;
+                    }
+                }
             }
         }
         player_actions
@@ -363,6 +384,7 @@ impl Game {
                     player_name: _,
                     to_player_tx: _,
                 } => unreachable!(),
+                Action::__Disconnect__ => unreachable!(),
             }
         }
         action_move_execution(

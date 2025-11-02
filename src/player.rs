@@ -12,6 +12,7 @@ pub struct Player {
     pub seeds: HashMap<Seed, u32>,
     pub points: u32,
     pub next_swapshroom_pair_id: Option<u32>,
+    pub connected: bool,
 }
 
 impl Player {
@@ -32,6 +33,7 @@ impl Player {
             seeds: HashMap::new(),
             points: 0,
             next_swapshroom_pair_id: None,
+            connected: true,
         }
     }
 
